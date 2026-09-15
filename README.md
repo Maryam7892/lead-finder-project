@@ -200,8 +200,9 @@ to pick up a newly created env.
   and click **Find companies**. Progress bars show search and scrape status live.
 - **Lead Database tab** - browse the results of your **most recent search**
   (each search replaces the database), filter by state, target type and
-  confidence, and download as CSV. (No service filter here on purpose - you
-  pick the service when *searching*.)
+  confidence, and download as CSV or Excel (.xlsx) - same option on the
+  purpose-built email-ready/SMS-ready exports too. (No service filter here
+  on purpose - you pick the service when *searching*.)
 - **Email Template tab** - shows the template for whatever service is
   currently selected in the sidebar; switching the service dropdown
   auto-switches the template shown here too. Edit it, click **Save
@@ -607,9 +608,12 @@ what makes the output genuinely tailored per company rather than one
 generic blast.
 
 **Before sending to real companies:**
-1. Click **Send test email to myself** first - this verifies your SMTP
-   credentials work and lets you see exactly what a recipient will get,
-   without contacting anyone.
+1. Use **Send a test email** first - this verifies your SMTP credentials
+   work and lets you see exactly what a recipient will get, without
+   contacting anyone. If your current leads span more than one target
+   type (e.g. both Event Management and Floral Businesses), you'll get a
+   separate row - and a separate template preview - for each one, since
+   each target type has its own pitch.
 2. Check the delay between sends. A few seconds per email is normal
    outbound practice and reduces the chance of your account getting
    rate-limited or flagged as spam - don't set this to zero for a large batch.

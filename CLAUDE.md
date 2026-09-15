@@ -57,16 +57,17 @@ through manually. This file is the contract that makes that possible.
 
 ## 2. Stack, layout, how to run
 
-- Python 3.11, Streamlit 1.38, pandas 2.2. Deps: `environment.yml` (conda,
-  canonical) / `requirements.txt` (pip fallback).
+- Python 3.11, Streamlit 1.38, pandas 2.2, openpyxl 3.1 (Excel export).
+  Deps: `environment.yml` (conda, canonical) / `requirements.txt` (pip
+  fallback).
 - Run: `streamlit run app.py` → `http://localhost:8501`.
 - Entry point: [`app.py`](app.py) — all UI, 5 tabs (Find Leads, Lead
-  Database, Email Template, Send Emails, Send Texts). ~1,270 lines.
+  Database, Email Template, Send Emails, Send Texts). ~1,560 lines.
 - Logic package: [`lead_finder/`](lead_finder/).
 - All persistent state is flat files in [`data/`](data/) (see §12).
 - Theme: `.streamlit/config.toml` (dark theme + `server.headless`).
 - `.env` holds all secrets and is gitignored. `.env.example` is the
-  template. Not a git repo yet.
+  template. Git repo since 2026-09-15, pushed to a public GitHub remote.
 
 ### Module responsibilities
 
@@ -794,10 +795,22 @@ happens automatically.
   {state}. Reply "unsubscribe" and we won't contact you again.`
 - **Signature** is built at render time from `.env` (`mailer.build_signature_text` /
   `build_signature_html`) — name, title, company, phone, WhatsApp (same
-  number, green badge), website (always shown `www.`-prefixed), address.
-  Any field left blank / on a `[placeholder]` default is omitted. It cannot
-  be edited away in the template editor — only the core message is
-  stored/edited.
+  number, real WhatsApp icon — no text label as of 2026-09-15, previously
+  read "WhatsApp: {phone}"), website (always shown `www.`-prefixed),
+  address. Any field left blank / on a `[placeholder]` default is omitted.
+  It cannot be edited away in the template editor — only the core message
+  is stored/edited. Two images are embedded inline (`cid:sig_logo`,
+  `cid:wa_icon`, both from `lead_finder/assets/`) via
+  `mailer.get_signature_inline_images()`. `signature_logo.png` was tightly
+  cropped to its visible content on 2026-09-15 (the original had ~30% dead
+  whitespace padding, which — combined with the logo `<td>`/`<img>` only
+  setting CSS `width` and relying on `height: auto` — made the logo cell
+  taller than the text column next to it in clients like Outlook that
+  don't reliably honor `height: auto`; fixed by cropping the asset AND
+  giving both the `<td>` and `<img>` explicit HTML `width`/`height`
+  attributes plus `valign="middle"`, not just CSS). `whatsapp_icon.png`
+  (the real WhatsApp glyph, green circle + white icon) is a new asset
+  added the same day, replacing a generic speech-bubble emoji badge.
 
 ---
 
@@ -896,9 +909,20 @@ lead's** service/vertical template. On each result the progress callback
 calls `mailer.record_sent(...)`; after the batch,
 `_write_daily_sent_records_csv`.
 
-**Test email:** builds a synthetic lead, subject prefixed `[TEST]`, sends
-to a chosen address (dropdown of known test addresses + Custom). Verifies
-SMTP before any real send.
+**Test email:** one row **per target vertical currently present** in the
+working set for the active service (in the service's own canonical
+vertical order — `states.get_target_verticals`), not a single generic
+send. A service with sub-verticals (Bookkeeping) has a *different*
+template per vertical (`email_template.VERTICAL_TEMPLATES`), so testing
+with no vertical set only ever exercised whatever `load_template()` falls
+back to and never showed what, say, a Floral Businesses lead would
+actually receive — fixed 2026-09-15. Each row: its own "send to" dropdown
+(known test addresses from `TEST_EMAIL_ADDRESSES` + Custom) and its own
+"Send" button, so e.g. Event Management and Floral Businesses can each be
+tested independently. Falls back to a single row (no vertical set) for a
+service with no sub-verticals at all. Builds a synthetic lead per row
+(`target_vertical` set to that row's vertical), subject prefixed `[TEST]`.
+Verifies SMTP before any real send.
 
 ### SMS (`Send Texts` tab, `texter.py`)
 
@@ -1054,6 +1078,41 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-15 (Excel exports, signature fixes, per-vertical test email)**
+  — Three user-requested changes:
+  1. **Excel (.xlsx) export** added alongside every CSV download in the
+     Lead Database tab (main leads, email-ready, SMS-ready) via a new
+     `app._to_xlsx_bytes()` helper (`pandas.ExcelWriter`, `openpyxl`
+     engine — already a listed but previously unused dependency).
+  2. **Email signature fixes** (`mailer.py`): removed the "WhatsApp: "
+     text label (the row now shows just the phone number); replaced the
+     generic speech-bubble emoji badge with the real WhatsApp icon
+     (`lead_finder/assets/whatsapp_icon.png`, new asset — official
+     simple-icons glyph rendered white on a `#25D366` circle via
+     `cairosvg`), embedded inline as `cid:wa_icon` alongside the existing
+     `cid:sig_logo`; fixed the logo visually overflowing below the
+     signature text by (a) tightly cropping `signature_logo.png` to its
+     visible content — the original had roughly 30% dead whitespace
+     padding around the mark, which was making the logo cell taller than
+     the text column next to it — and (b) giving the logo `<td>`/`<img>`
+     explicit HTML `width`/`height` attributes and `valign="middle"` in
+     addition to the existing CSS, since Outlook's rendering engine often
+     ignores `height: auto` and falls back to an image's native pixel
+     size. Verified by rendering the actual signature HTML through
+     Playwright (already a project dependency) and inspecting the
+     screenshot, not just reading the markup.
+  3. **Per-vertical test email** (Send Emails tab): "Send a test email"
+     now renders one row — its own address dropdown, its own "Send"
+     button — **per target vertical present in the current working set**
+     for the active service, instead of a single generic test send. Also
+     fixes a real pre-existing bug found while implementing this: the old
+     single test lead never set `target_vertical` at all, so a test send
+     could never actually exercise a vertical-specific template
+     (`email_template.VERTICAL_TEMPLATES`, e.g. Event Management or
+     Floral Businesses) — it silently always rendered whatever
+     `load_template()` falls back to. Verified against live data (a real
+     78-row Alabama database spanning both Event Management and Floral
+     Businesses) that the two rows render distinct subjects/bodies.
 - **2026-09-15 (Event Management + Floral audit — Alabama & Alaska)** — A
   manual audit across two states/verticals reported 16 suspected junk
   leads. Investigated each via direct site lookup rather than assuming;

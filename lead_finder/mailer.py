@@ -81,19 +81,34 @@ def build_signature_text(info: Dict[str, str]) -> str:
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 SIGNATURE_LOGO_PATH = os.path.join(ASSETS_DIR, "signature_logo.png")
 SIGNATURE_LOGO_CID = "sig_logo"
+# Fixed display box for the logo <img>, sent as explicit HTML width/height
+# attributes (not just CSS) so Outlook — which often ignores "height: auto"
+# and falls back to the image's native pixel size — doesn't blow the row
+# height out and push the logo below the text column. Matches
+# signature_logo.png's own aspect ratio (662x486, tightly cropped to its
+# visible content on 2026-09-15 — the original file had ~30% dead
+# whitespace padding around the mark, which is what was making the logo
+# cell taller than the text next to it). Update these two numbers if the
+# asset image's aspect ratio ever changes.
+SIGNATURE_LOGO_WIDTH = 240
+SIGNATURE_LOGO_HEIGHT = 176
+
+SIGNATURE_WA_ICON_PATH = os.path.join(ASSETS_DIR, "whatsapp_icon.png")
+SIGNATURE_WA_ICON_CID = "wa_icon"
 
 
 def build_signature_html(info: Dict[str, str], include_images: bool = True) -> str:
     """
     HTML signature block matching the reference layout: logo on the left,
     a thin gold vertical divider, then name/title/company, then four
-    contact lines in order — phone, WhatsApp (same number, distinguished
-    by its own green badge rather than the shared gold one), website
+    contact lines in order — phone, WhatsApp (same number, distinguished by
+    the real WhatsApp icon image rather than a text label), website
     (always displayed with a www. prefix regardless of how it's stored in
-    .env), address. Referenced via cid:sig_logo, embedded as an inline
-    attachment by send_email. include_images=False renders the same text
-    layout without the <img> tag, for contexts where the image attachment
-    isn't being sent (e.g. a plain preview).
+    .env), address. Both images (cid:sig_logo, cid:wa_icon) are embedded as
+    inline attachments by send_email via get_signature_inline_images().
+    include_images=False renders the same text layout without either <img>
+    tag, for contexts where the image attachments aren't being sent (e.g. a
+    plain preview) — no current caller uses this, but the option is kept.
     """
     name = info.get("sender_name", "")
     title = info.get("sender_title", "")
@@ -122,11 +137,24 @@ def build_signature_html(info: Dict[str, str], include_images: bool = True) -> s
     # Line 1: phone
     if _is_real_value(phone):
         right.append(_icon_row("&#128222;", phone))
-    # Line 2: WhatsApp — same number, distinct green badge (WhatsApp's own
-    # brand color) so it reads as a different channel at a glance, not just
-    # a duplicate phone line.
+    # Line 2: WhatsApp — same number, distinguished from line 1 by the real
+    # WhatsApp glyph rather than a text label (the "WhatsApp:" prefix was
+    # removed 2026-09-15 — the icon alone already says what it is). Uses
+    # the actual embedded WhatsApp icon image when images are available
+    # (real sends + the in-app preview); falls back to the old generic
+    # speech-bubble badge only for a hypothetical images-off render (no
+    # current caller passes include_images=False, but the option exists).
     if _is_real_value(phone):
-        right.append(_icon_row("&#128172;", f"WhatsApp: {phone}", bg_color="#25D366"))
+        if include_images:
+            right.append(
+                '<div style="margin-top: 6px;">'
+                f'<img src="cid:{SIGNATURE_WA_ICON_CID}" width="22" height="22" alt="WhatsApp" '
+                'style="width:22px; height:22px; vertical-align:middle; margin-right:8px; '
+                'border-radius:50%; display:inline-block;">'
+                f'<span style="vertical-align:middle;">{phone}</span></div>'
+            )
+        else:
+            right.append(_icon_row("&#128172;", phone, bg_color="#25D366"))
     # Line 3: website, always shown with a www. prefix regardless of how
     # it's stored in .env (e.g. "profitpathsolution.com" -> "www.profitpathsolution.com").
     if _is_real_value(website):
@@ -145,14 +173,19 @@ def build_signature_html(info: Dict[str, str], include_images: bool = True) -> s
 
     logo_cell = ""
     if include_images:
-        # Sized up slightly from the original 210px — the signature text
-        # block is now 4 contact lines tall instead of 3, so the logo needs
-        # to be a bit larger to stay visually balanced against it rather
-        # than looking small next to the taller column of text.
+        # Explicit width AND height on both the <img> and its <td> — not
+        # just CSS — because Outlook's rendering engine often ignores
+        # "height: auto" and falls back to the image's native pixel size,
+        # which would blow out the row height and visually push the logo
+        # below the text column next to it. valign is set as an HTML
+        # attribute too (Outlook honors that more reliably than CSS
+        # vertical-align). See SIGNATURE_LOGO_WIDTH/HEIGHT above.
         logo_cell = (
-            f'<td style="vertical-align: middle; padding-right: 22px;">'
-            f'<img src="cid:{SIGNATURE_LOGO_CID}" alt="" width="240" '
-            f'style="max-width: 240px; width: 240px; height: auto; display: block;">'
+            f'<td valign="middle" width="{SIGNATURE_LOGO_WIDTH}" '
+            f'style="vertical-align: middle; padding-right: 22px;">'
+            f'<img src="cid:{SIGNATURE_LOGO_CID}" alt="" '
+            f'width="{SIGNATURE_LOGO_WIDTH}" height="{SIGNATURE_LOGO_HEIGHT}" '
+            f'style="width:{SIGNATURE_LOGO_WIDTH}px; height:{SIGNATURE_LOGO_HEIGHT}px; display:block;">'
             f'</td>'
         )
 
@@ -160,18 +193,20 @@ def build_signature_html(info: Dict[str, str], include_images: bool = True) -> s
         '<table cellpadding="0" cellspacing="0" style="font-family: Arial, Helvetica, sans-serif; '
         'font-size: 13px; color: #222222;"><tr>'
         f'{logo_cell}'
-        '<td style="width: 1px; background-color: #d99a1b;">&nbsp;</td>'
-        f'<td style="vertical-align: middle; padding-left: 22px;">{right_html}</td>'
+        '<td valign="middle" style="width: 1px; background-color: #d99a1b;">&nbsp;</td>'
+        f'<td valign="middle" style="vertical-align: middle; padding-left: 22px;">{right_html}</td>'
         '</tr></table>'
     )
     return table
 
 
 def get_signature_inline_images() -> Dict[str, str]:
-    """The cid -> filepath mapping send_email needs to actually attach the signature logo."""
+    """The cid -> filepath mapping send_email needs to actually attach the signature images."""
     images = {}
     if os.path.exists(SIGNATURE_LOGO_PATH):
         images[SIGNATURE_LOGO_CID] = SIGNATURE_LOGO_PATH
+    if os.path.exists(SIGNATURE_WA_ICON_PATH):
+        images[SIGNATURE_WA_ICON_CID] = SIGNATURE_WA_ICON_PATH
     return images
 
 # -------------------------------------------------------------------- send --

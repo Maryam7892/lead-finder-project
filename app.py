@@ -1,3 +1,4 @@
+import io
 import os
 import threading
 
@@ -15,6 +16,13 @@ load_dotenv(override=True)  # .env always wins over a stray shell-exported var o
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SENT_RECORDS_DIR = os.path.join(DATA_DIR, "sent_records")
+
+
+def _to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Leads") -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return buf.getvalue()
 
 
 def _write_daily_sent_records_csv(results):
@@ -796,12 +804,21 @@ with tab_db:
             },
         )
 
-        st.download_button(
-            "⬇ Download as CSV",
-            data=filtered.to_csv(index=False).encode("utf-8"),
-            file_name="leads.csv",
-            mime="text/csv",
-        )
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                "⬇ Download as CSV",
+                data=filtered.to_csv(index=False).encode("utf-8"),
+                file_name="leads.csv",
+                mime="text/csv",
+            )
+        with dl_col2:
+            st.download_button(
+                "⬇ Download as Excel",
+                data=_to_xlsx_bytes(filtered, "Leads"),
+                file_name="leads.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
         st.markdown("---")
         st.markdown("**Purpose-built exports**")
@@ -831,6 +848,13 @@ with tab_db:
                 file_name="email_ready_leads.csv", mime="text/csv",
                 disabled=email_ready.empty,
             )
+            st.download_button(
+                "📧 Export email-ready Excel",
+                data=_to_xlsx_bytes(email_ready, "Email-ready"),
+                file_name="email_ready_leads.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                disabled=email_ready.empty,
+            )
         with scol:
             st.caption(f"**SMS-ready**: phone present, structurally valid, area code matches the "
                        f"lead's own state — {len(sms_ready)} rows")
@@ -838,6 +862,13 @@ with tab_db:
                 "💬 Export SMS-ready CSV",
                 data=sms_ready.to_csv(index=False).encode("utf-8"),
                 file_name="sms_ready_leads.csv", mime="text/csv",
+                disabled=sms_ready.empty,
+            )
+            st.download_button(
+                "💬 Export SMS-ready Excel",
+                data=_to_xlsx_bytes(sms_ready, "SMS-ready"),
+                file_name="sms_ready_leads.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 disabled=sms_ready.empty,
             )
         st.caption("SMS-ready excludes toll-free (800/888/etc.) and unrecognized area codes to stay strict — "
@@ -1181,39 +1212,70 @@ with tab_send:
                     st.caption(f"...and {len(eligible) - 10} more.")
 
             st.markdown("---")
-            tcol1, tcol2 = st.columns(2)
-            with tcol1:
-                TEST_EMAIL_OPTIONS = [
-                    e.strip() for e in os.getenv("TEST_EMAIL_ADDRESSES", "").split(",") if e.strip()
-                ] + ["Custom..."]
-                test_email_choice = st.selectbox("Send test email to", TEST_EMAIL_OPTIONS)
-                if test_email_choice == "Custom...":
-                    test_email_dest = st.text_input("Enter a custom test email address")
-                else:
-                    test_email_dest = test_email_choice
-                if st.button("📧 Send test email"):
-                    if not test_email_dest.strip():
+
+            TEST_EMAIL_OPTIONS = [
+                e.strip() for e in os.getenv("TEST_EMAIL_ADDRESSES", "").split(",") if e.strip()
+            ] + ["Custom..."]
+
+            # Test separately per target vertical actually present in the
+            # current working set, in the service's own canonical order —
+            # a mixed run (e.g. Event Management + Floral Businesses both
+            # searched) has a DIFFERENT template per vertical
+            # (email_template.VERTICAL_TEMPLATES), so one generic test send
+            # only ever exercised whichever template load_template() falls
+            # back to and never told you what a Floral lead would actually
+            # receive. Falls back to a single row (no vertical) for a
+            # service with no sub-verticals at all.
+            verticals_for_service = get_target_verticals(active_service) or []
+            ordered_labels = [v["label"] for v in verticals_for_service]
+            present_verticals = set(base_df["target_vertical"].dropna().astype(str).str.strip()) - {""}
+            test_verticals = [v for v in ordered_labels if v in present_verticals] or [""]
+
+            st.markdown("**Send a test email**")
+            if len(test_verticals) > 1:
+                st.caption(f"{len(test_verticals)} target types are in your current leads for "
+                           f"**{active_service}** — each has its own template, so send a separate "
+                           f"test for each one below.")
+
+            for v_label in test_verticals:
+                row_key = v_label or "_none"
+                row_title = v_label or active_service
+                vcol1, vcol2 = st.columns([3, 1])
+                with vcol1:
+                    choice = st.selectbox(f"Send test email to — {row_title}", TEST_EMAIL_OPTIONS,
+                                           key=f"test_email_choice_{row_key}")
+                    if choice == "Custom...":
+                        dest = st.text_input("Enter a custom test email address", key=f"test_email_custom_{row_key}")
+                    else:
+                        dest = choice
+                with vcol2:
+                    st.write("")  # vertical spacer so the button lines up with the selectbox, not its label
+                    st.write("")
+                    send_clicked = st.button(f"📧 Send — {row_title}", key=f"test_email_send_{row_key}")
+                if send_clicked:
+                    if not dest.strip():
                         st.error("Enter an email address first.")
                     else:
                         test_lead = {
-                            "company_name": "Test Company", "service": service or SERVICE_PRESETS[0],
+                            "company_name": "Test Company", "service": active_service,
+                            "target_vertical": v_label,
                             "state": state_names[0] if state_names else "Texas",
                             "phone": "(555) 123-4567", "email": "", "website": "https://example.com",
                         }
                         subj, body = email_template.render_for_lead(test_lead)
                         html_body = email_template.render_html_for_lead(test_lead)
                         inline_images = mailer.get_signature_inline_images()
-                        success, error = mailer.send_email(smtp_config, test_email_dest.strip(), f"[TEST] {subj}",
+                        success, error = mailer.send_email(smtp_config, dest.strip(), f"[TEST] {subj}",
                                                              body, html_body=html_body, inline_images=inline_images)
                         if success:
-                            st.success(f"Test email sent to {test_email_dest.strip()}. Check that inbox (and spam folder).")
+                            st.success(f"Test email ({row_title}) sent to {dest.strip()}. Check that inbox (and spam folder).")
                         else:
                             st.error(f"Send failed: {error}")
-            with tcol2:
-                delay_seconds = st.number_input("Delay between sends (seconds)", min_value=1.0, max_value=30.0,
-                                                  value=4.0, step=1.0,
-                                                  help="A gap between sends is normal outbound-email practice and "
-                                                       "reduces the chance your account gets rate-limited or flagged.")
+
+            delay_seconds = st.number_input("Delay between sends (seconds)", min_value=1.0, max_value=30.0,
+                                              value=4.0, step=1.0,
+                                              help="A gap between sends is normal outbound-email practice and "
+                                                   "reduces the chance your account gets rate-limited or flagged.")
 
             if not eligible.empty:
                 confirm = st.checkbox(f"I understand this will send {len(eligible)} real emails to real companies.")
