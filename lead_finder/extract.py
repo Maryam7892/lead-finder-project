@@ -45,6 +45,14 @@ PLACEHOLDER_LOCAL_PARTS = {
 }
 PLACEHOLDER_EMAIL_DOMAINS = {"work.com", "company.com", "website.com", "email.com"}
 
+# A 32-hex-char local part (an MD5-shaped hash/UUID) is never something a
+# human typed as their own address — it's an auto-generated identifier, most
+# often a Sentry/error-tracking DSN or webhook address that leaked into the
+# page's visible text. Found via a real case: a site's own error-tracking
+# subdomain (`sentry.<their-domain>`) was scraped and stored as the lead's
+# contact email (added 2026-09-15).
+_HEX_HASH_LOCAL_PART_RE = re.compile(r"^[0-9a-f]{32}$")
+
 # Well-known FREE CONSUMER email providers. Used only by score_lead's
 # mailto: domain-match exemption (see there) — a mailto: pointing at one of
 # these is unambiguously the site owner's own personal inbox, never
@@ -149,6 +157,10 @@ def is_placeholder_email(email: str) -> bool:
     if local in PLACEHOLDER_LOCAL_PARTS:
         return True
     if domain in PLACEHOLDER_EMAIL_DOMAINS:
+        return True
+    if _HEX_HASH_LOCAL_PART_RE.match(local):
+        return True
+    if domain.split(".")[0] == "sentry":
         return True
     return False
 

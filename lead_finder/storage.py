@@ -113,6 +113,11 @@ def rescan_confidence(df: pd.DataFrame) -> pd.DataFrame:
       that wasn't when the row was first collected (e.g. "hi@", "contact@",
       "wecare@" were added 2026-09-14 after showing up unfiltered — this
       lets an existing CSV benefit without re-scraping)
+    - an address `extract.is_placeholder_email` now rejects (added
+      2026-09-15: this check runs at scrape time but was missing here,
+      so a placeholder rule added after a row was collected e.g. the
+      32-hex-char/`sentry.*` auto-tracking-email pattern never
+      retroactively applied until now)
     all get dropped. If `all_emails_found` has another candidate that
     passes every check, that's used instead.
 
@@ -124,6 +129,8 @@ def rescan_confidence(df: pd.DataFrame) -> pd.DataFrame:
 
     def _passes_email_checks(e: str) -> bool:
         if not e or not extract.EMAIL_RE.fullmatch(e):
+            return False
+        if extract.is_placeholder_email(e):
             return False
         if extract.email_domain_is_blocked(e):
             return False

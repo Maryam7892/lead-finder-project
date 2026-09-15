@@ -433,17 +433,38 @@ Returns True (skip, don't scrape) if **any** of:
   domain's own giveaway (mrportapottyorlando.com), an Australian/Indian
   destination-wedding site (thegrandindianwedding.com), an Italian tourism
   board (turismotorino.org), a food/travel blog (bucketlistbums.com), and
-  an estate/garden venue mistagged as a florist (sunnylands.org). Grow this
-  list as more turn up in real result data.
-- `FOREIGN_BUSINESS_DOMAINS` (added 2026-09-14) — `alfaridhospital.com`
-  (a hospital in Qatar) and `confidentalclinic.com` (a dental clinic in
-  Purley, UK) — both surfaced under an Alabama Dental Practices search
-  despite a plain `.com` TLD, so `is_foreign_tld` never had a chance to
-  catch them. Same underlying gap as the Australian destination-wedding
-  site and Italian tourism board found earlier: **there is no real
-  geography check beyond TLD + phone area code**, so a foreign business on
-  a `.com`/`.org` domain is only ever caught by getting hardcoded here
-  after the fact. Not solved generally on purpose — see §15.
+  an estate/garden venue mistagged as a florist (sunnylands.org), and
+  (added 2026-09-15 from an Alabama/Alaska Event Management + Floral
+  audit) three more national order/booking networks masquerading as local
+  businesses — **Kremp Florist** (kremp.com), **Avas Flowers**
+  (avasflowers.net — avasflowers.**com** was already listed; the same
+  network also operates on the .net TLD), and a same-day delivery network
+  (flowersin4hours.com) — plus two national wedding-vendor booking
+  services that explicitly advertise "nationwide"/"all 50 states"
+  coverage (indian-wedding-dj.com and its same-operator alias
+  djmehul.com, poshweddingplanners.com), a tourism-board site whose "Host
+  an Event" subpage got scraped under the misleading name "Sitka Weddings
+  and Events" (travelsitka.com — a *different*, real local business,
+  "Sitka Weddings & Events LLC" at sitkaweddings.com, survived this audit
+  and was NOT blocked), a travel/food blog (travelcookeat.com), and a
+  gambling/casino content blog with zero relation to flowers
+  (techntrip.com). Grow this list as more turn up in real result data.
+- `FOREIGN_BUSINESS_DOMAINS` (added 2026-09-14, extended 2026-09-15) —
+  `alfaridhospital.com` (a hospital in Qatar), `confidentalclinic.com` (a
+  dental clinic in Purley, UK) — both surfaced under an Alabama Dental
+  Practices search — plus, from the 2026-09-15 audit, `azonova.com` (a
+  software engineering studio in New Delhi, India — not even an event
+  business; a doubly-wrong match), `greenplantflowers.com` (a florist in
+  Sharjah, UAE), and `flowerdeliverydanang.com` (a florist in Da Nang,
+  Vietnam — the business's own name said "Da Nang," but nothing upstream
+  checks a business name for a foreign place name). All confirmed via
+  direct lookup of the live site, not guessed — despite a plain `.com`
+  TLD, so `is_foreign_tld` never had a chance to catch them. Same
+  underlying gap as the Australian destination-wedding site and Italian
+  tourism board found earlier: **there is no real geography check beyond
+  TLD + phone area code**, so a foreign business on a `.com`/`.org` domain
+  is only ever caught by getting hardcoded here after the fact. Not
+  solved generally on purpose — see §15.
 - `WEBSITE_BUILDER_DEFAULT_DOMAINS` (added 2026-09-14) — squarespace.com,
   wixsite.com, weebly.com, godaddysites.com, business.site, wordpress.com,
   sites.google.com, webs.com, yolasite.com, jimdofree.com, strikingly.com,
@@ -483,7 +504,15 @@ positive silently deletes a real lead. Drops a row if **any**:
    "Law" isn't the last word there), `box office / ticket sales`,
    `magazine / blog / podcast / directory`, `chamber of commerce / visitors
    bureau / tourism board / turismo`, a name starting with `Visit
-   <Placename>` (destination-marketing sites), `film & tv production`.
+   <Placename>` (destination-marketing sites), `film & tv production`,
+   newspaper-masthead words (`star-news/tribune/gazette/chronicle/...`),
+   professional-association/academic-department names (`academy of /
+   association of / society of / college of / school of / institute of ...
+   dentistry/dental/medicine/veterinary`), bare `veterinar(y|ian)`, and
+   (added 2026-09-15, from a real Alabama nail salon literally named
+   "Florist Nails & Spa" that passed Floral Businesses relevance on its own
+   name) `nails? ... salon/bar/spa/studio/lounge` — nail salons are never a
+   target of any vertical here, unconditional like photography/veterinary.
 4a. **Domain** is checked against the *same* `_OFF_TARGET_NAME_PATTERNS`
    list, plus a separate plain-substring list `_OFF_TARGET_DOMAIN_SUBSTRINGS`
    (`portapotty`, `dumpster`, `ticketsales`, `boxoffice`, `lawfirm`,
@@ -580,7 +609,11 @@ Email handling:
   list / sent-log dedup.
 - `mailto:` and regex emails both filtered for placeholders
   (`is_placeholder_email`: local part in `you/your/name/test/...`, domain
-  in `work.com/company.com/...`) and blocked domains
+  in `work.com/company.com/...`; also, **added 2026-09-15**, a 32-hex-char
+  local part (an MD5/UUID shape no human types) or a domain whose first
+  label is `sentry` — found via a real case where a site's own
+  `sentry.<their-domain>` error-tracking address leaked into the page text
+  and was stored as the lead's contact email) and blocked domains
   (`email_domain_is_blocked`: the email's own domain is a blocklisted /
   foreign-TLD site — a leaked/syndicated widget contact).
 - **Generic role prefixes** (`blocklist.GENERIC_EMAIL_PREFIXES`) are dropped
@@ -1021,6 +1054,61 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-15 (Event Management + Floral audit — Alabama & Alaska)** — A
+  manual audit across two states/verticals reported 16 suspected junk
+  leads. Investigated each via direct site lookup rather than assuming;
+  confirmed 13 as real junk (root causes: 3 foreign businesses on plain
+  `.com` domains — a New Delhi software studio, a UAE florist, a Vietnam
+  florist; 3 national florist/delivery networks — Kremp, Avas Flowers'
+  `.net`, flowersin4hours.com; 3 national wedding-vendor booking services
+  advertising "all 50 states" coverage; a tourism-board site scraped under
+  a misleading "Weddings and Events" name; a gambling blog and a
+  travel/food blog with zero relation to the vertical; a nail salon named
+  "Florist Nails"). Fixed:
+  - `FOREIGN_BUSINESS_DOMAINS` +3 (azonova.com, greenplantflowers.com,
+    flowerdeliverydanang.com); `EVENT_AND_FLORAL_DIRECTORY_DOMAINS` +9
+    (kremp.com, avasflowers.net, flowersin4hours.com,
+    indian-wedding-dj.com + its same-operator alias djmehul.com,
+    poshweddingplanners.com, travelsitka.com, travelcookeat.com,
+    techntrip.com).
+  - New unconditional `junk_filter` name pattern for nail salons (§6a
+    rule 4), same precision-safe reasoning as the photography/veterinary
+    additions.
+  - New general placeholder-email pattern in `extract.is_placeholder_email`
+    (§7): a 32-hex-char local part or a `sentry.*` domain — found because
+    Avas Flowers' stored "email" was literally a Sentry.io error-tracking
+    auto-address (`<hash>@sentry.avasflowers.net`) that had leaked into
+    the page's scraped text. General, not domain-specific — protects
+    against the same class of bug on any site using client-side error
+    tracking.
+  - **Found and fixed a related gap while implementing the above**:
+    `storage.rescan_confidence`'s email re-validation never called
+    `is_placeholder_email` at all, so *no* placeholder rule (old or new)
+    was retroactively applied to an existing CSV — only scrape-time
+    filtering benefited. Added the missing check.
+  - The remaining 3 reported leads (Picture Perfect Wedding Florals /
+    perfectweddingevents.net, Frond & Twig, Sitka Weddings & Events LLC /
+    sitkaweddings.com) were investigated and found to be **real local
+    businesses**, not junk — verified via direct site lookup (named
+    owners, local phone numbers, non-templated content). Deliberately
+    NOT blocklisted. Picture Perfect's site does have a real phone number
+    that the current pipeline never captured (only the Gmail mailto was
+    found) — a data-quality gap, not a junk-filter gap; not fixed here,
+    noted for a future extraction-quality pass.
+  - A fourth category (several other reported leads, e.g. Magnolias
+    Flower Farm, Luxx Weddings and Events LLC) were flagged by the audit
+    only as "Gmail only" with no other stated problem. Spot-checking one
+    of these (Frond & Twig) found a genuine local business, so these were
+    **not** blocklisted — flagging "Gmail-only" as inherently too weak to
+    trust would mean revisiting the 2026-09-11 mailto:-consumer-domain
+    exemption, which that change log entry explicitly says not to revert
+    without re-confirming its closed cases stay closed. Left as an open
+    question for the user rather than acted on unilaterally.
+  **Applied retroactively** to the live `data/leads.csv` (119 rows,
+  Alabama + Alaska, Event Management + Floral Businesses): rescanned,
+  re-ran the junk pass per vertical, re-purged to High-only → 106 rows,
+  18 with email (was 119 / 29) — all 13 confirmed-junk cases dropped by
+  name, none of the 3 confirmed-real businesses were touched.
 - **2026-09-15 (git init, repo made public)** — Project put under git and
   pushed to a public GitHub repo. `.gitignore` expanded to cover every
   file in `data/` (previously only `leads.csv`) — send logs, suppression

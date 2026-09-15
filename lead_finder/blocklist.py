@@ -34,6 +34,11 @@ DIRECTORY_DOMAINS = {
 FOREIGN_BUSINESS_DOMAINS = {
     "alfaridhospital.com",  # hospital in Qatar
     "confidentalclinic.com",  # dental clinic in Purley, UK
+    # found in an Alabama/Alaska Event Management + Floral audit (2026-09-15)
+    "azonova.com",  # product engineering studio in New Delhi, India — also
+                     # not an event business at all, a doubly-wrong match
+    "greenplantflowers.com",  # florist in Sharjah, UAE
+    "flowerdeliverydanang.com",  # florist in Da Nang, Vietnam
 }
 
 # Freelance/job marketplaces — results are gig listings, not companies.
@@ -119,8 +124,12 @@ EVENT_AND_FLORAL_DIRECTORY_DOMAINS = {
     # national flower-order gateways (not a local florist)
     "1800flowers.com", "1800flowersalhambra.com", "ftd.com", "teleflora.com",
     "floristone.com", "fromyouflowers.com", "flowershopnetwork.com",
-    "bloomnation.com", "proflowers.com", "avasflowers.com", "sendflowers.com",
-    "flowerdelivery.com", "urbanstems.com", "ode-a-la-rose.com",
+    "bloomnation.com", "proflowers.com", "avasflowers.com", "avasflowers.net",
+    "sendflowers.com", "flowerdelivery.com", "urbanstems.com",
+    "ode-a-la-rose.com", "kremp.com", "flowersin4hours.com",
+    # national wedding-vendor booking services (serve "all 50 states" /
+    # destination weddings, not a business local to the state searched)
+    "indian-wedding-dj.com", "djmehul.com", "poshweddingplanners.com",
     # unrelated national retail chains seen in results
     "dollartree.com", "nothingbundtcakes.com", "walmart.com", "target.com",
     "costco.com", "instacart.com",
@@ -134,6 +143,13 @@ EVENT_AND_FLORAL_DIRECTORY_DOMAINS = {
     "local-service-close-by.com", "mrportapottyorlando.com",
     "thegrandindianwedding.com", "turismotorino.org", "benitolink.com",
     "inmenlo.com", "bucketlistbums.com", "sunnylands.org",
+    # found in an Alabama/Alaska Event Management + Floral audit
+    # (2026-09-15): a tourism-board site whose "Host an Event" subpage got
+    # scraped and named "Sitka Weddings and Events" (misleading — the site
+    # is actually a Sitka, AK visitor guide, not a wedding business), a
+    # travel/food blog, and a gambling/casino content blog with no
+    # relation to flowers at all.
+    "travelsitka.com", "travelcookeat.com", "techntrip.com",
 }
 
 # A business still on a website-builder's free default subdomain (never

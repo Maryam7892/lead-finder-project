@@ -83,6 +83,11 @@ _OFF_TARGET_NAME_PATTERNS = [
     # name ("veterinary dentistry" is an actual specialty) without making
     # the business a fit for a HUMAN dental-practice search.
     re.compile(r"\bveterinar(y|ian)\b", re.I),
+    # Nail salons are never a target of any vertical in this app. Found in
+    # an audit: a real Huntsville, AL nail salon literally named "Florist
+    # Nails" passed the Floral Businesses relevance check on its own name
+    # alone. Unconditional, same reasoning as photography/veterinary.
+    re.compile(r"\bnails?\b.{0,15}\b(salon|bar|spa|studio|lounge)\b", re.I),
 ]
 
 # Same idea as above, but for the DOMAIN string — a junk site sometimes
