@@ -1,6 +1,7 @@
 import io
 import os
 import threading
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -8,7 +9,7 @@ from dotenv import load_dotenv
 
 from lead_finder import search, scrape, storage, email_template, blocklist, mailer, osm_source, extract, area_codes, texter, hubspot_crm, browser_scrape, junk_filter
 from lead_finder.states import (
-    US_STATES, SERVICE_PRESETS, ACTIVE_SERVICES, get_search_target,
+    US_STATES, ACTIVE_SERVICES, get_search_target,
     get_major_cities, get_target_verticals, get_extra_metro_areas,
 )
 
@@ -688,6 +689,26 @@ with tab_find:
                 # current search's results, never an accumulation across runs.
                 updated_df = storage.save_leads(all_new_rows, replace=True)
                 st.session_state.results_df = updated_df
+
+                # Also archive this run as its own dated Excel snapshot,
+                # separate from leads.csv (which the NEXT run will replace).
+                # This is what lets Send Emails/Send Texts send from an
+                # older run later without re-scraping — scraping and
+                # sending don't have to happen in the same session. Non-
+                # critical: a failure here (e.g. disk full) shouldn't lose
+                # the run itself, which is already safely saved above.
+                business_types_for_name = [t["label"] for t in targets] if targets else [service]
+                export_filename = storage.build_export_filename(
+                    datetime.now().strftime("%Y-%m-%d"), business_types_for_name,
+                    state_names, all_states=all_states,
+                )
+                try:
+                    storage.save_export_snapshot(updated_df, export_filename)
+                    st.caption(f"📁 Archived as `{export_filename}` — pick it later from Send Emails/Send Texts "
+                               f"without re-running this search.")
+                except Exception as e:
+                    st.caption(f"⚠️ Could not archive this run's snapshot ({e}) — leads.csv itself is fine.")
+
                 with_email = sum(1 for r in all_new_rows if r.get("email"))
                 with_phone = sum(1 for r in all_new_rows if r.get("phone"))
                 st.session_state.last_run_stats = {
@@ -1123,15 +1144,38 @@ with tab_send:
             icon="✉️",
         )
     else:
-        df = st.session_state.results_df
+        # Scraping and sending don't have to happen in the same session —
+        # every search run also archives a dated Excel snapshot (see
+        # storage.save_export_snapshot); pick one or more here to send from
+        # instead of whatever's currently in the live database. Leave empty
+        # to fall back to the normal live-database behavior.
+        history_snapshots = storage.list_export_snapshots()
+        with st.expander("📂 Send from a saved run instead of the current database", expanded=False):
+            if not history_snapshots:
+                st.caption("No archived runs yet — every completed search auto-saves one here, "
+                           "named `date_businesstypes_states.xlsx`.")
+                selected_snapshots = []
+            else:
+                selected_snapshots = st.multiselect(
+                    "Saved run(s) to send from",
+                    [s["filename"] for s in history_snapshots],
+                    help="Pick one or more. Their leads are combined (deduped by domain) and used "
+                         "below instead of the current Lead Database tab view.",
+                )
+
+        df = storage.load_export_snapshots(selected_snapshots) if selected_snapshots else st.session_state.results_df
+
         if df.empty:
-            st.info("No leads saved yet. Run a search from the **Find Leads** tab first.")
+            st.info("No leads to send from. Run a search from **Find Leads**, or pick a saved run above.")
         else:
             st.caption(f"Sending as **{smtp_config.get('from_name') or smtp_config['from_email']}** "
                        f"via {smtp_config['host']}. Each lead is rendered with *its own* service's "
                        "template automatically — a mixed batch sends the right pitch to each company.")
 
-            base_df = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
+            if selected_snapshots:
+                base_df = df
+            else:
+                base_df = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
 
             # Two hard, non-adjustable safety filters — not inherited from
             # Lead Database's filter, which stays user-adjustable there.
@@ -1140,14 +1184,19 @@ with tab_send:
             # was locked down) got sent that service's pitch instead of the
             # Bookkeeping one, and Medium/Low confidence leads generated
             # auto-reply support tickets. Both are now always enforced here
-            # regardless of what Lead Database's own filter is set to.
+            # regardless of what Lead Database's own filter is set to, AND
+            # regardless of whether the leads came from the live database
+            # or a saved snapshot above.
             active_service = service or "Bookkeeping"
             pre_filter_count = len(base_df)
             base_df = base_df[base_df["service"] == active_service]
             base_df = base_df[base_df["confidence_label"] == "High"]
             excluded_by_safety = pre_filter_count - len(base_df)
 
-            st.info(f"Working from the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc}) "
+            source_desc = (f"{len(selected_snapshots)} saved run(s): {', '.join(selected_snapshots)}"
+                            if selected_snapshots else
+                            f"the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc})")
+            st.info(f"Working from {source_desc} "
                     f"— then restricted to **{active_service}** service and **High confidence only** "
                     f"(fixed safety rules, not adjustable here) — {len(base_df)} leads remain"
                     + (f", {excluded_by_safety} excluded by those two rules" if excluded_by_safety else "") + ".",
@@ -1382,9 +1431,25 @@ with tab_text:
             icon="💬",
         )
     else:
-        df = st.session_state.results_df
+        history_snapshots_t = storage.list_export_snapshots()
+        with st.expander("📂 Send from a saved run instead of the current database", expanded=False):
+            if not history_snapshots_t:
+                st.caption("No archived runs yet — every completed search auto-saves one here, "
+                           "named `date_businesstypes_states.xlsx`.")
+                selected_snapshots_t = []
+            else:
+                selected_snapshots_t = st.multiselect(
+                    "Saved run(s) to send from",
+                    [s["filename"] for s in history_snapshots_t],
+                    help="Pick one or more. Their leads are combined (deduped by domain) and used "
+                         "below instead of the current Lead Database tab view.",
+                    key="sms_snapshot_picker",
+                )
+
+        df = (storage.load_export_snapshots(selected_snapshots_t) if selected_snapshots_t
+              else st.session_state.results_df)
         if df.empty:
-            st.info("No leads saved yet. Run a search from the **Find Leads** tab first.")
+            st.info("No leads to send from. Run a search from **Find Leads**, or pick a saved run above.")
         else:
             st.caption("Texting via 8x8. Each lead is rendered "
                        "with its own service's SMS template automatically.")
@@ -1411,7 +1476,10 @@ with tab_text:
 
             st.markdown("---")
 
-            base_df_t = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
+            if selected_snapshots_t:
+                base_df_t = df
+            else:
+                base_df_t = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
 
             active_service_t = service or "Bookkeeping"
             pre_filter_count_t = len(base_df_t)
@@ -1419,7 +1487,10 @@ with tab_text:
             base_df_t = base_df_t[base_df_t["confidence_label"] == "High"]
             excluded_by_safety_t = pre_filter_count_t - len(base_df_t)
 
-            st.info(f"Working from the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc}) "
+            source_desc_t = (f"{len(selected_snapshots_t)} saved run(s): {', '.join(selected_snapshots_t)}"
+                              if selected_snapshots_t else
+                              f"the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc})")
+            st.info(f"Working from {source_desc_t} "
                     f"— then restricted to **{active_service_t}** service and **High confidence only** "
                     f"(fixed safety rules, not adjustable here) — {len(base_df_t)} leads remain"
                     + (f", {excluded_by_safety_t} excluded by those two rules" if excluded_by_safety_t else "") + ".",

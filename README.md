@@ -577,6 +577,18 @@ and `SENDER_*` values. For Gmail, use an
 [App Password](https://myaccount.google.com/apppasswords) - Google blocks
 plain-password SMTP logins. Restart the app after editing `.env`.
 
+**Scraping and sending don't have to happen in the same sitting.** Every
+completed search run auto-saves an Excel snapshot to `data/exports/`, named
+`date_businesstypes_states.xlsx` (e.g.
+`2026-09-15_EventManagement+FloralBusinesses_Alabama+Alaska.xlsx` - all
+50 states + DC collapses to `...AllStates.xlsx` rather than listing every
+one). Open the **"Send from a saved run instead of the current database"**
+expander at the top of Send Emails (or Send Texts) to pick one or more of
+these - their leads are combined and used for that send instead of
+whatever's currently in the Lead Database tab, so you can run several
+searches across different days/states/business types and then send from
+any of them (or several combined) later, without re-scraping anything.
+
 **How it decides who's eligible to send to:**
 - Has an email address (obviously)
 - **High confidence only** and **matching the currently selected service** -

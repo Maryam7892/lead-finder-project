@@ -14,3 +14,4 @@ data/suppression_list.csv
 data/custom_email_templates.json
 data/custom_sms_templates.json
 data/sent_records/
+data/exports/

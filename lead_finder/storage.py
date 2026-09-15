@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Dict
 
 import pandas as pd
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 LEADS_CSV = os.path.join(DATA_DIR, "leads.csv")
+# Every search run also archives an Excel snapshot here (see
+# save_export_snapshot below) — unlike leads.csv, which a search run always
+# REPLACES, this folder accumulates one file per run, so scraping and
+# sending can be decoupled: Send Emails/Send Texts can pick leads from any
+# past run's snapshot instead of only whatever the most recent search left
+# in leads.csv. Added 2026-09-15.
+EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
 COLUMNS = [
     "company_name", "website", "domain", "phone", "email",
@@ -86,6 +94,66 @@ def save_leads(new_rows: List[Dict], replace: bool = False) -> pd.DataFrame:
 def clear_leads():
     ensure_store()
     pd.DataFrame(columns=COLUMNS).to_csv(LEADS_CSV, index=False)
+
+
+def _sanitize_filename_part(text: str) -> str:
+    """Collapse a label into a filename-safe token (letters/digits only) — e.g. 'Event Management' -> 'EventManagement'."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "", text or "")
+    return cleaned or "Unknown"
+
+
+def build_export_filename(date_str: str, business_types: List[str], states: List[str], all_states: bool = False) -> str:
+    """
+    date_businesstypes_states.xlsx, e.g.
+    '2026-09-15_EventManagement+FloralBusinesses_Alabama+Alaska.xlsx'.
+    Multiple business types / states are joined with '+'. A "Search all 50
+    states + DC" run collapses to 'AllStates' rather than listing all 51 —
+    the full list is still in every row's own `state` column.
+    """
+    types_part = "+".join(_sanitize_filename_part(t) for t in business_types) or "Unknown"
+    states_part = "AllStates" if all_states else ("+".join(_sanitize_filename_part(s) for s in states) or "Unknown")
+    return f"{date_str}_{types_part}_{states_part}.xlsx"
+
+
+def save_export_snapshot(df: pd.DataFrame, filename: str) -> str:
+    """Archive a run's results as a standalone Excel file in EXPORTS_DIR. Returns the full path written."""
+    os.makedirs(EXPORTS_DIR, exist_ok=True)
+    path = os.path.join(EXPORTS_DIR, filename)
+    df.to_excel(path, index=False, engine="openpyxl")
+    return path
+
+
+def list_export_snapshots() -> List[Dict]:
+    """Every archived run snapshot, newest first — filename, full path, and last-modified time."""
+    if not os.path.isdir(EXPORTS_DIR):
+        return []
+    items = []
+    for fname in os.listdir(EXPORTS_DIR):
+        if not fname.lower().endswith(".xlsx"):
+            continue
+        path = os.path.join(EXPORTS_DIR, fname)
+        items.append({"filename": fname, "path": path, "mtime": os.path.getmtime(path)})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items
+
+
+def load_export_snapshots(filenames: List[str]) -> pd.DataFrame:
+    """
+    Read and combine one or more archived snapshots by filename (as returned
+    by list_export_snapshots), deduped by domain like a normal search run.
+    This is the "send from a saved file instead of the current database"
+    path — scraping and sending don't have to happen in the same session.
+    """
+    frames = []
+    for fname in filenames:
+        path = os.path.join(EXPORTS_DIR, fname)
+        if os.path.exists(path):
+            frames.append(pd.read_excel(path, dtype=str, engine="openpyxl"))
+    if not frames:
+        return _normalize(pd.DataFrame(columns=COLUMNS))
+    combined = pd.concat(frames, ignore_index=True)
+    combined = _normalize(combined)
+    return combined.drop_duplicates(subset=["domain"], keep="last")
 
 
 def rescan_confidence(df: pd.DataFrame) -> pd.DataFrame:

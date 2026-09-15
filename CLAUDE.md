@@ -83,7 +83,7 @@ through manually. This file is the contract that makes that possible.
 | `extract.py` | Pull name/email/phone/owner/LinkedIn from HTML; authenticity checks; `score_lead` | Do network I/O |
 | `browser_scrape.py` | Playwright re-scrape fallback for JS-rendered sites; reuses `scrape.scrape_company` via `html_override` | Duplicate extraction logic |
 | `area_codes.py` | Area-code → state map; `phone_matches_state` (soft signal) | Hard-reject a lead |
-| `storage.py` | `leads.csv` load/`save_leads` (default: replace with this run only; `replace=False` merges), dedupe by domain, empty-value normalization, `rescan_confidence` | Accumulate across runs by default |
+| `storage.py` | `leads.csv` load/`save_leads` (default: replace with this run only; `replace=False` merges), dedupe by domain, empty-value normalization, `rescan_confidence`; per-run Excel archive to `data/exports/` (`save_export_snapshot`/`list_export_snapshots`/`load_export_snapshots`/`build_export_filename`) | Accumulate across runs by default (`leads.csv` itself — the exports archive is deliberately the one place that DOES accumulate) |
 | `email_template.py` | Per-service + per-vertical email templates, SMS templates, merge-field render to text/HTML | Send anything |
 | `mailer.py` | SMTP send, rate-limited batch, sent-log, shared suppression list, HTML signature builder | Send without an explicit call |
 | `texter.py` | 8x8 Connect SMS send, rate-limited batch, sent-text-log, E.164 formatting | Send without an explicit call |
@@ -178,6 +178,18 @@ verticals, otherwise the service itself):
    runs. Dedupe within the run is by `domain` (`keep="last"`). If a run
    keeps **zero** rows, the previous file is left untouched and a warning
    is shown (so a failed/empty search doesn't wipe good data).
+   **Also archives** (added 2026-09-15, non-critical — a failure here
+   doesn't affect the save above): `storage.save_export_snapshot` writes
+   the same kept rows as a standalone `.xlsx` into `data/exports/`, named
+   `storage.build_export_filename(date, business_types, states)` →
+   `date_businesstypes_states.xlsx` (e.g.
+   `2026-09-15_EventManagement+FloralBusinesses_Alabama+Alaska.xlsx`;
+   `all_states=True` collapses the states part to `AllStates` instead of
+   listing all 51). Unlike `leads.csv`, this folder **does** accumulate —
+   one file per run — so scraping and sending don't have to happen in the
+   same session: Send Emails/Send Texts can load leads from any past
+   run's snapshot instead of only whatever the most recent search left in
+   `leads.csv` (see §14).
 9. Run stats + `last_run_domains` are stored in session state. Since the DB
    is now always exactly one run, `last_run_domains` == every domain in the
    table, and every tab simply shows the whole table.
@@ -825,13 +837,14 @@ happens automatically.
 | `sent_text_log.csv` | `texter.record_sent_text` | phone, company_name, service, status, error, sent_at. **Dedup key = phone (E.164 string).** `dtype=str` on load is essential (a `+1512...` parses as int otherwise). | yes |
 | `suppression_list.csv` | `mailer.add_to_suppression` | value, added_at. One list, **shared across email + SMS.** Matches on exact email, exact domain, or normalized phone digits. | — |
 | `sent_records/<vertical>/<YYYY-MM-DD>.csv` | `app._write_daily_sent_records_csv` | Human-readable per-vertical, per-day export of email sends. Additive — `sent_log.csv` is still the dedup source. Vertical folder name is sanitized; leads with no vertical → `General`. | — |
+| `exports/<date>_<businesstypes>_<states>.xlsx` | `storage.save_export_snapshot`, once per completed search run | Same columns as `leads.csv`, frozen at that run's end. **Accumulates** — one file per run, never overwritten by the next search (unlike `leads.csv`). Read back by `storage.load_export_snapshots` when Send Emails/Send Texts picks one or more saved runs to send from instead of the live database. | yes |
 
 `.gitignore` lists `.env`, `__pycache__/`, `*.pyc`, `.venv/`, `venv/`,
 `.DS_Store`, and every file in `data/` (`leads.csv`, `sent_log.csv`,
 `sent_text_log.csv`, `suppression_list.csv`, `custom_email_templates.json`,
-`custom_sms_templates.json`, `sent_records/`) — all per-run/per-machine
-state or real scraped contact data, not source (§16 item 1, resolved
-2026-09-15).
+`custom_sms_templates.json`, `sent_records/`, `exports/`) — all
+per-run/per-machine state or real scraped contact data, not source (§16
+item 1, resolved 2026-09-15).
 
 ---
 
@@ -875,6 +888,15 @@ background thread → progress + results (persist after `eligible` empties).
 ### Email (`Send Emails` tab, `mailer.py`)
 
 **Eligibility funnel** (each step shown as a metric):
+0. **Optional: send from a saved run instead of the live database**
+   (added 2026-09-15) — an expander lists every archived snapshot
+   (`storage.list_export_snapshots`, newest first); picking one or more
+   loads and combines them (`storage.load_export_snapshots`, deduped by
+   domain) and that becomes the starting point for everything below,
+   bypassing the Lead Database tab's live filter entirely. Leave nothing
+   selected to fall back to step 1's normal behavior. The fixed safety
+   filters in step 2 still apply either way — a saved snapshot gets no
+   exemption from them.
 1. Start from the Lead Database tab's current filtered view
    (`st.session_state.lead_db_view`), or the full DB if none.
 2. **Fixed safety filters** (not adjustable in this tab, added after real
@@ -925,6 +947,10 @@ service with no sub-verticals at all. Builds a synthetic lead per row
 Verifies SMTP before any real send.
 
 ### SMS (`Send Texts` tab, `texter.py`)
+
+Same optional "send from a saved run instead of the live database" picker
+as Send Emails (step 0 above), independent state (its own multiselect key)
+but identical behavior.
 
 **Eligibility:** same fixed safety filters (service + High). Then: has a
 phone; if "Only leads with no email" (default on) also require empty email;
@@ -1078,6 +1104,36 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-15 (decouple scraping from sending: run archive + picker)** —
+  User request: be able to download each run's results and later send
+  email/text from a chosen past run (or several combined) without having
+  to re-run the search first. Implemented as a per-run archive rather
+  than a manual upload flow:
+  - New `storage.save_export_snapshot`/`list_export_snapshots`/
+    `load_export_snapshots`/`build_export_filename`. Every completed
+    search run (right after `save_leads(replace=True)`) now ALSO writes
+    a standalone `.xlsx` to the new `data/exports/` folder (added to
+    `.gitignore` — same real-contact-data sensitivity as the rest of
+    `data/`), named `date_businesstypes_states.xlsx` per the user's
+    requested convention (e.g.
+    `2026-09-15_EventManagement+FloralBusinesses_Alabama+Alaska.xlsx`).
+    Unlike `leads.csv`, this folder is deliberately append-only — one
+    file per run, never overwritten by the next search — since the whole
+    point is to keep past runs reachable after `leads.csv` moves on.
+    "Search all 50 states + DC" collapses the states part of the
+    filename to `AllStates` rather than listing all 51.
+  - Send Emails and Send Texts tabs each gained a "Send from a saved run
+    instead of the current database" expander: a multiselect of archived
+    filenames (newest first); picking one or more loads and combines
+    them (deduped by domain) as the starting point for that tab's
+    eligibility funnel, in place of the live Lead Database view. The two
+    fixed safety filters (service match + High confidence only) still
+    apply unconditionally either way — picking an old snapshot is not an
+    exemption from them.
+  - Also fixed a small leftover from the earlier per-vertical test-email
+    change: `SERVICE_PRESETS` was imported in `app.py` but no longer
+    used anywhere after that change removed its only call site — deleted
+    rather than left as dead import weight.
 - **2026-09-15 (Excel exports, signature fixes, per-vertical test email)**
   — Three user-requested changes:
   1. **Excel (.xlsx) export** added alongside every CSV download in the
