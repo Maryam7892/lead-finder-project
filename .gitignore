@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+
+# Per-run/per-machine data — real scraped contact info and send history,
+# not source. See CLAUDE.md §12 and §16 item 1.
+data/leads.csv
+data/sent_log.csv
+data/sent_text_log.csv
+data/suppression_list.csv
+data/custom_email_templates.json
+data/custom_sms_templates.json
+data/sent_records/
