@@ -796,15 +796,22 @@ happens automatically.
 **Rendering:**
 - `render_for_lead(lead)` → `(subject, plain_body)`. Subject is the first
   line if it starts `Subject:`, else `"A note for {company}"`. `**bold**`
-  markers stripped for plain text. Appends `\n\nBest,\n{signature}\n\n{compliance}`.
+  markers stripped for plain text. Appends `\n\nBest,\n{signature}`.
 - `render_html_for_lead(lead)` → HTML: `**bold**` → `<strong>`, paragraphs
-  wrapped in `<p>`, HTML signature (with `cid:sig_logo` image ref),
-  compliance line in small grey text.
+  wrapped in `<p>`, HTML signature (with `cid:sig_logo` image ref).
 - `render_html_preview_for_lead(lead)` → same but signature image inlined
   as base64 data URI (Streamlit can't resolve `cid:`).
-- **Compliance line** (always appended, not editable):
-  `You're receiving this because {company_name} is publicly listed in
-  {state}. Reply "unsubscribe" and we won't contact you again.`
+- **No compliance/opt-out line** (removed 2026-09-15, explicit user
+  request — see change log). Every template used to have
+  `\'re receiving this because {company_name} is publicly listed in
+  {state}. Reply "unsubscribe" and we won't contact you again.` appended
+  after the signature, unconditionally and not editable from the UI, as
+  this app's only in-email CAN-SPAM opt-out mechanism. **It is gone now,
+  from every send path (real and test), for every service/vertical/state
+  — there is no opt-out language anywhere in a sent email**, and the
+  user was explicitly told this before confirming. Do not silently
+  re-add it; if compliance needs it back, that's a deliberate decision
+  for the user to make, not an assumed default.
 - **Signature** is built at render time from `.env` (`mailer.build_signature_text` /
   `build_signature_html`) — name, title, company, phone, WhatsApp (same
   number, real WhatsApp icon — no text label as of 2026-09-15, previously
@@ -1104,6 +1111,24 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-15 (compliance/opt-out line removed, explicit user request)**
+  — `email_template._compliance_line` and both its call sites
+  (`render_for_lead`, `render_html_for_lead`) deleted outright. Every
+  email this app sends used to end with an unconditional, non-editable
+  line: `You're receiving this because {company_name} is publicly listed
+  in {state}. Reply "unsubscribe" and we won't contact you again.` — this
+  was the app's only in-email CAN-SPAM opt-out mechanism. The user asked
+  for it gone "permanently... from everywhere... applies to all mails (all
+  businesses, all states)" — before implementing, they were told
+  explicitly that this line was the only opt-out language in the email
+  and asked to confirm full removal with no replacement (as opposed to
+  keeping a shorter opt-out line); they confirmed full removal. Verified
+  by rendering a test lead through both `render_for_lead` and
+  `render_html_for_lead` and grepping the output for "publicly listed"/
+  "unsubscribe" — absent from both. This is a real compliance trade-off,
+  not just a copy change — see the note in §11 and the updated
+  "Compliance" section in README.md. Do not re-add this line as a "fix"
+  without the user asking for it back.
 - **2026-09-15 (decouple scraping from sending: run archive + picker)** —
   User request: be able to download each run's results and later send
   email/text from a chosen past run (or several combined) without having

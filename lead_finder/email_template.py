@@ -128,10 +128,6 @@ def _split_subject(rendered: str, fallback_company: str) -> Tuple[str, str]:
     return subject, body
 
 
-def _compliance_line(company_name: str, state: str) -> str:
-    return (f'You\'re receiving this because {company_name} is publicly listed in {state}. '
-            f'Reply "unsubscribe" and we won\'t contact you again.')
-
 def _render_bold_html(text: str) -> str:
     """Converts **bold** markdown segments to <strong> tags, escaping everything else."""
     parts = re.split(r'(\*\*.+?\*\*)', text)
@@ -157,9 +153,9 @@ def render_for_lead(lead: Dict) -> Tuple[str, str]:
     Render using *this lead's own* service template (not whatever template
     happens to be open in the editor) — so a batch of mixed-service leads
     each gets the pitch that actually matches what they were found under.
-    Returns (subject, plain_body) with the signature and compliance line
-    already appended. For the HTML version (with the real embedded
-    signature images), see render_html_for_lead.
+    Returns (subject, plain_body) with the signature already appended. For
+    the HTML version (with the real embedded signature images), see
+    render_html_for_lead.
     """
     from . import mailer  # local import: avoids any import-order issues at module load
 
@@ -168,10 +164,8 @@ def render_for_lead(lead: Dict) -> Tuple[str, str]:
     subject, body = _split_subject(rendered_core, lead.get("company_name", "you"))
     body = _strip_markdown_bold(body)
 
-    fields = _merge_fields(lead)
     signature = mailer.build_signature_text(mailer.get_sender_info())
-    compliance = _compliance_line(fields["company_name"], fields["state"])
-    full_body = f"{body}\n\nBest,\n{signature}\n\n{compliance}"
+    full_body = f"{body}\n\nBest,\n{signature}"
     return subject, full_body
 
 
@@ -191,15 +185,12 @@ def render_html_for_lead(lead: Dict) -> str:
 
     body_html = _text_to_html_paragraphs(body)
     signature_html = mailer.build_signature_html(mailer.get_sender_info())
-    fields = _merge_fields(lead)
-    compliance_html = html_lib.escape(_compliance_line(fields["company_name"], fields["state"]))
     return (
         '<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; '
         'line-height: 1.5; color: #222222;">'
         f"{body_html}"
         "<p>Best,</p>"
         f'<div style="margin-top: 4px;">{signature_html}</div>'
-        f'<p style="color: #888888; font-size: 11px; margin-top: 18px;">{compliance_html}</p>'
         "</div>"
     )
 

@@ -637,6 +637,14 @@ generic blast.
   working opt-out that you actually honor. `SENDER_ADDRESS` in `.env` fills
   the address into every template's footer - don't leave it blank before a
   real send.
+- **As of 2026-09-15, no email this app sends contains any opt-out/
+  unsubscribe language** - the line that used to say "Reply unsubscribe
+  and we won't contact you again" was removed everywhere (real sends,
+  test sends, every service/vertical/state) at the user's explicit
+  request. CAN-SPAM's opt-out requirement is not satisfied automatically
+  by anything in this app anymore - if you need that, add opt-out wording
+  back into your own templates yourself (Email Template tab), since the
+  app no longer appends any.
 - If any recipients are in the EU/UK, **GDPR/PECR** rules on unsolicited
   B2B email are stricter and vary by country - worth checking before a
   wide send.
