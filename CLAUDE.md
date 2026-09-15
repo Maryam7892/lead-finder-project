@@ -874,6 +874,7 @@ All optional for finding/scraping. Required only for the feature named.
 | `TEST_EMAIL_ADDRESSES` | email | Optional comma-separated list for the "Send test email to" dropdown (Send Emails tab). Blank = only "Custom..." is offered. Moved out of `app.py` 2026-09-15 so real addresses aren't hardcoded into public source. |
 | `EIGHTXEIGHT_API_KEY` + `EIGHTXEIGHT_SUBACCOUNT_ID` | SMS | **Both** required or `get_active_texting_config()` returns None. From developer.8x8.com/connect. |
 | `EIGHTXEIGHT_SOURCE` | SMS | Optional Sender ID shown as "from". Blank = account default. |
+| `TEST_TEXT_NUMBERS` | SMS | Optional comma-separated list for the "Send test text to" dropdown (Send Texts tab), same pattern as `TEST_EMAIL_ADDRESSES`. Blank = only "Custom..." is offered. Added 2026-09-15. |
 | `HUBSPOT_ACCESS_TOKEN` | HubSpot | Private App token (`pat-...`), scopes `crm.objects.contacts.read/write` + `crm.schemas.contacts.write`. |
 
 `app.py` calls `load_dotenv(override=True)` — `.env` beats a stray shell
@@ -971,7 +972,13 @@ anything else surfaces `HTTP <code>: <body>`. Phone → E.164 via
 `texter.to_e164` (10-digit → `+1`; `+`-prefixed passed through;
 8–15 digits → `+<digits>`; else None → skipped).
 
-**Test text:** enter your own number, message prefixed `[TEST]`.
+**Test text:** dropdown of known numbers (`TEST_TEXT_NUMBERS` + Custom),
+mirroring Send Emails' test-address dropdown — added 2026-09-15, replacing
+a plain always-Custom text input. Unlike email, this is a **single** row
+regardless of how many target verticals are in the working set: SMS
+templates are service-level only (`email_template.load_sms_template(service)`,
+no `target_vertical` parameter — see §11), so there's no per-vertical
+template to test separately. Message prefixed `[TEST]`.
 
 ### HubSpot (Lead Database tab, `hubspot_crm.py`)
 
@@ -1111,6 +1118,20 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-15 (8x8 subaccount ID added — texting now live)** — User
+  supplied `EIGHTXEIGHT_SUBACCOUNT_ID`, completing `texter.get_eightxeight_config`'s
+  two required vars (`EIGHTXEIGHT_API_KEY` was already set) — the Send
+  Texts tab is no longer gated behind the "not configured yet" message.
+  Verified: `get_active_texting_config()` now returns a real config, and
+  the tab renders its full eligibility funnel against live data. Also
+  brought the "send test text" flow up to the same pattern as email's
+  (added earlier the same day): new `TEST_TEXT_NUMBERS` env var (comma-
+  separated, `.env`/`.env.example`) feeding a "Send test text to"
+  dropdown + Custom, replacing the old plain always-Custom text input.
+  Deliberately still **one** test row (not per-vertical like email) since
+  SMS templates don't vary by vertical — see §11/§14. `TEST_TEXT_NUMBERS`
+  is left blank pending the user supplying actual test numbers; nothing
+  has been sent yet.
 - **2026-09-15 (compliance/opt-out line removed, explicit user request)**
   — `email_template._compliance_line` and both its call sites
   (`render_for_lead`, `render_html_for_lead`) deleted outright. Every

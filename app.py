@@ -1541,8 +1541,21 @@ with tab_text:
             st.markdown("---")
             tcol1, tcol2 = st.columns(2)
             with tcol1:
-                test_number = st.text_input("Your phone number (for a test text)", placeholder="+1 512 555 1234")
-                if st.button("💬 Send test text to this number"):
+                # Mirrors the email tab's TEST_EMAIL_ADDRESSES pattern — a
+                # known-numbers dropdown instead of retyping a number every
+                # time, with "Custom..." always available. SMS templates
+                # are service-level only (no per-vertical split like email's
+                # VERTICAL_TEMPLATES — see email_template.load_sms_template),
+                # so unlike Send Emails this only ever needs ONE test row.
+                TEST_TEXT_OPTIONS = [
+                    n.strip() for n in os.getenv("TEST_TEXT_NUMBERS", "").split(",") if n.strip()
+                ] + ["Custom..."]
+                test_number_choice = st.selectbox("Send test text to", TEST_TEXT_OPTIONS)
+                if test_number_choice == "Custom...":
+                    test_number = st.text_input("Enter a custom test phone number", placeholder="+1 512 555 1234")
+                else:
+                    test_number = test_number_choice
+                if st.button("💬 Send test text"):
                     if not test_number.strip():
                         st.error("Enter a phone number first.")
                     else:
