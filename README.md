@@ -582,12 +582,22 @@ completed search run auto-saves an Excel snapshot to `data/exports/`, named
 `date_businesstypes_states.xlsx` (e.g.
 `2026-09-15_EventManagement+FloralBusinesses_Alabama+Alaska.xlsx` - all
 50 states + DC collapses to `...AllStates.xlsx` rather than listing every
-one). Open the **"Send from a saved run instead of the current database"**
-expander at the top of Send Emails (or Send Texts) to pick one or more of
-these - their leads are combined and used for that send instead of
-whatever's currently in the Lead Database tab, so you can run several
-searches across different days/states/business types and then send from
-any of them (or several combined) later, without re-scraping anything.
+one). Open the **"Send from a saved run or an uploaded file instead of the
+current database"** expander at the top of Send Emails (or Send Texts) to
+pick one or more of these - their leads are combined and used for that
+send instead of whatever's currently in the Lead Database tab, so you can
+run several searches across different days/states/business types and then
+send from any of them (or several combined) later, without re-scraping
+anything.
+
+The same expander also has a file uploader, for a copy of one of these
+exports you've moved, downloaded on another machine, or hand-edited (e.g.
+deleted a few rows you didn't want to send to) - drop in one or more
+`.xlsx`/`.csv` files and they're combined with anything picked above, same
+as a saved run. It expects the file to still have this app's own columns
+(`service`, `confidence_label`, etc.) - a completely unrelated contact list
+will upload fine but show 0 eligible leads, since the same High-confidence
+and service-match safety checks apply no matter where the leads came from.
 
 **How it decides who's eligible to send to:**
 - Has an email address (obviously)

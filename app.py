@@ -1146,11 +1146,13 @@ with tab_send:
     else:
         # Scraping and sending don't have to happen in the same session —
         # every search run also archives a dated Excel snapshot (see
-        # storage.save_export_snapshot); pick one or more here to send from
-        # instead of whatever's currently in the live database. Leave empty
-        # to fall back to the normal live-database behavior.
+        # storage.save_export_snapshot); pick one or more here, or upload
+        # file(s) from anywhere on your own machine (e.g. a downloaded
+        # export you've moved or hand-edited), to send from instead of
+        # whatever's currently in the live database. Leave both empty to
+        # fall back to the normal live-database behavior.
         history_snapshots = storage.list_export_snapshots()
-        with st.expander("📂 Send from a saved run instead of the current database", expanded=False):
+        with st.expander("📂 Send from a saved run or an uploaded file instead of the current database", expanded=False):
             if not history_snapshots:
                 st.caption("No archived runs yet — every completed search auto-saves one here, "
                            "named `date_businesstypes_states.xlsx`.")
@@ -1162,17 +1164,44 @@ with tab_send:
                     help="Pick one or more. Their leads are combined (deduped by domain) and used "
                          "below instead of the current Lead Database tab view.",
                 )
+            uploaded_files = st.file_uploader(
+                "Or upload Excel/CSV file(s) from your computer",
+                type=["xlsx", "csv"], accept_multiple_files=True,
+                help="Any of this app's own exports — a data/exports/ download, or the Lead Database "
+                     "tab's CSV/Excel export — edited or not, from anywhere on your machine. Combined "
+                     "with any saved run(s) picked above, deduped by domain. A file with no "
+                     "service/confidence_label columns (not one of this app's own exports) will pass "
+                     "through with 0 eligible leads below — the safety filters still apply.",
+            )
 
-        df = storage.load_export_snapshots(selected_snapshots) if selected_snapshots else st.session_state.results_df
+        source_frames = []
+        source_labels = []
+        upload_errors = []
+        if selected_snapshots:
+            source_frames.append(storage.load_export_snapshots(selected_snapshots))
+            source_labels.append(f"{len(selected_snapshots)} saved run(s): {', '.join(selected_snapshots)}")
+        if uploaded_files:
+            uploaded_df, upload_errors = storage.load_uploaded_snapshots(uploaded_files)
+            source_frames.append(uploaded_df)
+            source_labels.append(f"{len(uploaded_files)} uploaded file(s): "
+                                  f"{', '.join(f.name for f in uploaded_files)}")
+        if upload_errors:
+            st.warning("Couldn't read: " + "; ".join(upload_errors))
+
+        using_custom_source = bool(source_frames)
+        if using_custom_source:
+            df = storage.dedupe_keep_last(pd.concat(source_frames, ignore_index=True)) if len(source_frames) > 1 else source_frames[0]
+        else:
+            df = st.session_state.results_df
 
         if df.empty:
-            st.info("No leads to send from. Run a search from **Find Leads**, or pick a saved run above.")
+            st.info("No leads to send from. Run a search from **Find Leads**, or pick/upload a saved run above.")
         else:
             st.caption(f"Sending as **{smtp_config.get('from_name') or smtp_config['from_email']}** "
                        f"via {smtp_config['host']}. Each lead is rendered with *its own* service's "
                        "template automatically — a mixed batch sends the right pitch to each company.")
 
-            if selected_snapshots:
+            if using_custom_source:
                 base_df = df
             else:
                 base_df = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
@@ -1185,16 +1214,15 @@ with tab_send:
             # Bookkeeping one, and Medium/Low confidence leads generated
             # auto-reply support tickets. Both are now always enforced here
             # regardless of what Lead Database's own filter is set to, AND
-            # regardless of whether the leads came from the live database
-            # or a saved snapshot above.
+            # regardless of whether the leads came from the live database,
+            # a saved snapshot, or an uploaded file above.
             active_service = service or "Bookkeeping"
             pre_filter_count = len(base_df)
             base_df = base_df[base_df["service"] == active_service]
             base_df = base_df[base_df["confidence_label"] == "High"]
             excluded_by_safety = pre_filter_count - len(base_df)
 
-            source_desc = (f"{len(selected_snapshots)} saved run(s): {', '.join(selected_snapshots)}"
-                            if selected_snapshots else
+            source_desc = (" + ".join(source_labels) if using_custom_source else
                             f"the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc})")
             st.info(f"Working from {source_desc} "
                     f"— then restricted to **{active_service}** service and **High confidence only** "
@@ -1432,7 +1460,7 @@ with tab_text:
         )
     else:
         history_snapshots_t = storage.list_export_snapshots()
-        with st.expander("📂 Send from a saved run instead of the current database", expanded=False):
+        with st.expander("📂 Send from a saved run or an uploaded file instead of the current database", expanded=False):
             if not history_snapshots_t:
                 st.caption("No archived runs yet — every completed search auto-saves one here, "
                            "named `date_businesstypes_states.xlsx`.")
@@ -1445,11 +1473,39 @@ with tab_text:
                          "below instead of the current Lead Database tab view.",
                     key="sms_snapshot_picker",
                 )
+            uploaded_files_t = st.file_uploader(
+                "Or upload Excel/CSV file(s) from your computer",
+                type=["xlsx", "csv"], accept_multiple_files=True,
+                help="Any of this app's own exports — a data/exports/ download, or the Lead Database "
+                     "tab's CSV/Excel export — edited or not, from anywhere on your machine. Combined "
+                     "with any saved run(s) picked above, deduped by domain. A file with no "
+                     "service/confidence_label columns (not one of this app's own exports) will pass "
+                     "through with 0 eligible leads below — the safety filters still apply.",
+                key="sms_file_uploader",
+            )
 
-        df = (storage.load_export_snapshots(selected_snapshots_t) if selected_snapshots_t
-              else st.session_state.results_df)
+        source_frames_t = []
+        source_labels_t = []
+        upload_errors_t = []
+        if selected_snapshots_t:
+            source_frames_t.append(storage.load_export_snapshots(selected_snapshots_t))
+            source_labels_t.append(f"{len(selected_snapshots_t)} saved run(s): {', '.join(selected_snapshots_t)}")
+        if uploaded_files_t:
+            uploaded_df_t, upload_errors_t = storage.load_uploaded_snapshots(uploaded_files_t)
+            source_frames_t.append(uploaded_df_t)
+            source_labels_t.append(f"{len(uploaded_files_t)} uploaded file(s): "
+                                    f"{', '.join(f.name for f in uploaded_files_t)}")
+        if upload_errors_t:
+            st.warning("Couldn't read: " + "; ".join(upload_errors_t))
+
+        using_custom_source_t = bool(source_frames_t)
+        if using_custom_source_t:
+            df = (storage.dedupe_keep_last(pd.concat(source_frames_t, ignore_index=True))
+                  if len(source_frames_t) > 1 else source_frames_t[0])
+        else:
+            df = st.session_state.results_df
         if df.empty:
-            st.info("No leads to send from. Run a search from **Find Leads**, or pick a saved run above.")
+            st.info("No leads to send from. Run a search from **Find Leads**, or pick/upload a saved run above.")
         else:
             st.caption("Texting via 8x8. Each lead is rendered "
                        "with its own service's SMS template automatically.")
@@ -1476,7 +1532,7 @@ with tab_text:
 
             st.markdown("---")
 
-            if selected_snapshots_t:
+            if using_custom_source_t:
                 base_df_t = df
             else:
                 base_df_t = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df
@@ -1487,8 +1543,7 @@ with tab_text:
             base_df_t = base_df_t[base_df_t["confidence_label"] == "High"]
             excluded_by_safety_t = pre_filter_count_t - len(base_df_t)
 
-            source_desc_t = (f"{len(selected_snapshots_t)} saved run(s): {', '.join(selected_snapshots_t)}"
-                              if selected_snapshots_t else
+            source_desc_t = (" + ".join(source_labels_t) if using_custom_source_t else
                               f"the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc})")
             st.info(f"Working from {source_desc_t} "
                     f"— then restricted to **{active_service_t}** service and **High confidence only** "

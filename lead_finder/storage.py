@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import pandas as pd
 
@@ -137,6 +137,25 @@ def list_export_snapshots() -> List[Dict]:
     return items
 
 
+def dedupe_keep_last(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dedupe by domain, like a normal search run — but never collapse rows
+    that all happen to have a BLANK domain into just one. That's a real risk
+    for an uploaded file (see load_uploaded_snapshots): a hand-edited sheet
+    with no website/domain column normalizes every row's domain to "", and
+    a plain drop_duplicates(subset=["domain"]) would silently keep only the
+    LAST such row and discard the rest — real leads, quietly gone. Rows
+    with an actual domain still dedupe against each other as always; rows
+    without one are all kept.
+    """
+    if df.empty:
+        return df
+    has_domain = df["domain"].astype(str).str.strip() != ""
+    with_domain = df[has_domain].drop_duplicates(subset=["domain"], keep="last")
+    without_domain = df[~has_domain]
+    return pd.concat([with_domain, without_domain], ignore_index=True)
+
+
 def load_export_snapshots(filenames: List[str]) -> pd.DataFrame:
     """
     Read and combine one or more archived snapshots by filename (as returned
@@ -153,7 +172,43 @@ def load_export_snapshots(filenames: List[str]) -> pd.DataFrame:
         return _normalize(pd.DataFrame(columns=COLUMNS))
     combined = pd.concat(frames, ignore_index=True)
     combined = _normalize(combined)
-    return combined.drop_duplicates(subset=["domain"], keep="last")
+    return dedupe_keep_last(combined)
+
+
+def load_uploaded_snapshots(files) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Same idea as load_export_snapshots, but for files picked through a
+    browser file-uploader (in memory, never touch EXPORTS_DIR) rather than
+    ones still sitting in data/exports/ on this machine — for a file the
+    user moved elsewhere, hand-edited, or is bringing over from another
+    computer. Each `files` entry is a Streamlit UploadedFile (file-like,
+    readable directly by pandas). Expected to be one of this app's own
+    exports (or a Lead Database CSV/Excel download), since a plain contact
+    list with no `service`/`confidence_label` columns will normalize to
+    "Unrated"/blank and get filtered out entirely by the sending tabs' hard
+    safety gate — that gate is intentional and not bypassed here (see
+    CLAUDE.md §14).
+
+    Returns (combined_df, errors) — errors names any file that couldn't be
+    read at all (wrong format, corrupted), so the caller can surface them
+    instead of a silent partial result.
+    """
+    frames = []
+    errors = []
+    for f in files:
+        name = getattr(f, "name", "uploaded file")
+        try:
+            if name.lower().endswith(".csv"):
+                frames.append(pd.read_csv(f, dtype=str))
+            else:
+                frames.append(pd.read_excel(f, dtype=str, engine="openpyxl"))
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    if not frames:
+        return _normalize(pd.DataFrame(columns=COLUMNS)), errors
+    combined = pd.concat(frames, ignore_index=True)
+    combined = _normalize(combined)
+    return dedupe_keep_last(combined), errors
 
 
 def rescan_confidence(df: pd.DataFrame) -> pd.DataFrame:

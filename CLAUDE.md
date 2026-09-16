@@ -83,7 +83,7 @@ through manually. This file is the contract that makes that possible.
 | `extract.py` | Pull name/email/phone/owner/LinkedIn from HTML; authenticity checks; `score_lead` | Do network I/O |
 | `browser_scrape.py` | Playwright re-scrape fallback for JS-rendered sites; reuses `scrape.scrape_company` via `html_override` | Duplicate extraction logic |
 | `area_codes.py` | Area-code → state map; `phone_matches_state` (soft signal) | Hard-reject a lead |
-| `storage.py` | `leads.csv` load/`save_leads` (default: replace with this run only; `replace=False` merges), dedupe by domain, empty-value normalization, `rescan_confidence`; per-run Excel archive to `data/exports/` (`save_export_snapshot`/`list_export_snapshots`/`load_export_snapshots`/`build_export_filename`) | Accumulate across runs by default (`leads.csv` itself — the exports archive is deliberately the one place that DOES accumulate) |
+| `storage.py` | `leads.csv` load/`save_leads` (default: replace with this run only; `replace=False` merges), dedupe by domain, empty-value normalization, `rescan_confidence`; per-run Excel archive to `data/exports/` (`save_export_snapshot`/`list_export_snapshots`/`load_export_snapshots`/`build_export_filename`); reading user-uploaded Excel/CSV files (`load_uploaded_snapshots`); blank-domain-safe dedup (`dedupe_keep_last`) | Accumulate across runs by default (`leads.csv` itself — the exports archive is deliberately the one place that DOES accumulate) |
 | `email_template.py` | Per-service + per-vertical email templates, SMS templates, merge-field render to text/HTML | Send anything |
 | `mailer.py` | SMTP send, rate-limited batch, sent-log, shared suppression list, HTML signature builder | Send without an explicit call |
 | `texter.py` | 8x8 Connect SMS send, rate-limited batch, sent-text-log, E.164 formatting | Send without an explicit call |
@@ -896,15 +896,26 @@ background thread → progress + results (persist after `eligible` empties).
 ### Email (`Send Emails` tab, `mailer.py`)
 
 **Eligibility funnel** (each step shown as a metric):
-0. **Optional: send from a saved run instead of the live database**
-   (added 2026-09-15) — an expander lists every archived snapshot
-   (`storage.list_export_snapshots`, newest first); picking one or more
-   loads and combines them (`storage.load_export_snapshots`, deduped by
-   domain) and that becomes the starting point for everything below,
-   bypassing the Lead Database tab's live filter entirely. Leave nothing
-   selected to fall back to step 1's normal behavior. The fixed safety
-   filters in step 2 still apply either way — a saved snapshot gets no
-   exemption from them.
+0. **Optional: send from a saved run and/or an uploaded file instead of
+   the live database** (added 2026-09-15, extended same day with the
+   upload half) — an expander lists every archived snapshot
+   (`storage.list_export_snapshots`, newest first) AND offers a
+   multi-file uploader (`st.file_uploader`, `.xlsx`/`.csv`) for files
+   from anywhere on the user's own machine — not just ones still sitting
+   in `data/exports/` on this one. Picking snapshot(s) and/or uploading
+   file(s) loads and combines all of them (`storage.load_export_snapshots`
+   + `storage.load_uploaded_snapshots`, unioned and deduped via
+   `storage.dedupe_keep_last`) and that becomes the starting point for
+   everything below, bypassing the Lead Database tab's live filter
+   entirely. Leave both empty to fall back to step 1's normal behavior.
+   The fixed safety filters in step 2 still apply either way — a saved
+   snapshot or uploaded file gets no exemption from them, which in
+   practice means an uploaded file that ISN'T one of this app's own
+   exports (no `service`/`confidence_label` columns) normalizes to
+   `service=""`/`confidence_label="Unrated"` and produces **zero**
+   eligible leads — deliberate, not a bug (see §16 note on this if one
+   gets added). A bad/corrupt uploaded file is skipped with its error
+   shown, not silently dropped or a hard crash.
 1. Start from the Lead Database tab's current filtered view
    (`st.session_state.lead_db_view`), or the full DB if none.
 2. **Fixed safety filters** (not adjustable in this tab, added after real
@@ -1113,11 +1124,49 @@ merges any newly-found non-empty fields.
    which reduces per-request size/timeout risk without hammering Overpass
    per city. Revisit if per-city OSM granularity is still wanted — it's a
    bigger, separate piece of work (geocoding + its own rate limiting).
+9. **The Send Emails/Send Texts file-upload feature (§14 step 0) only
+   works for files shaped like this app's own exports** — a genuine
+   external contact list (just name/email/phone, no `service`/
+   `confidence_label` columns) normalizes to `service=""`/
+   `confidence_label="Unrated"` and is filtered down to zero eligible
+   leads by the hard safety gate, by design. If sending from a truly
+   arbitrary external list is ever wanted, that's a deliberate scope
+   change to the safety model (bypassing confidence scoring entirely),
+   not a bug fix — don't loosen the gate to "fix" this without the user
+   explicitly asking for it.
 
 ---
 
 ## Change log
 
+- **2026-09-15 (upload leads from your own computer to send from)** —
+  Extended the same-day "send from a saved run" feature: Send Emails and
+  Send Texts each gained a multi-file uploader (`st.file_uploader`,
+  `.xlsx`/`.csv`) in the same expander as the saved-run picker, for files
+  the user has moved, hand-edited, or is bringing from another machine —
+  not just ones still sitting in `data/exports/` on this one. New
+  `storage.load_uploaded_snapshots(files) -> (df, errors)` reads and
+  combines them (CSV via `pd.read_csv`, Excel via `pd.read_excel`),
+  skipping and reporting (not silently dropping) any file that fails to
+  parse. New `storage.dedupe_keep_last` factors out a dedup-by-domain
+  that's **safe for a blank domain column** — found while designing this:
+  a hand-made sheet with no domain/website column would normalize every
+  row's domain to `""`, and the existing `drop_duplicates(subset=["domain"])`
+  pattern used elsewhere would silently collapse ALL such rows down to
+  just the last one. `load_export_snapshots` was also switched to this
+  safer helper. Picked snapshots and uploaded files combine into one
+  pool (unioned, then deduped). The two hard safety filters (service
+  match + High confidence) apply to this combined pool exactly as they
+  do to the live database — an uploaded file that isn't shaped like one
+  of this app's own exports (no `service`/`confidence_label` columns)
+  correctly produces zero eligible leads rather than bypassing scoring;
+  see §16 item 9. Verified end-to-end against a live app instance: built
+  a real `.xlsx`, uploaded it through the browser, and confirmed the
+  eligibility banner and lead count updated correctly; separately
+  confirmed the blank-domain case (2 hand-made rows, no domain column)
+  keeps both rows instead of collapsing to 1, and that a corrupted upload
+  is reported as an error rather than crashing the page or silently
+  vanishing.
 - **2026-09-15 (8x8 subaccount ID added — texting now live)** — User
   supplied `EIGHTXEIGHT_SUBACCOUNT_ID`, completing `texter.get_eightxeight_config`'s
   two required vars (`EIGHTXEIGHT_API_KEY` was already set) — the Send
