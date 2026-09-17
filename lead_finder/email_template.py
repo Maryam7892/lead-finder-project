@@ -329,51 +329,103 @@ GENERIC_SMS_TEMPLATE = (
     "We help with {service_lower}. Worth a quick call? Reply STOP to opt out."
 )
 
+# A/B/C test variants (added 2026-09-18): the client supplied 3 alternate
+# SMS bodies to run in parallel across different states/business types and
+# see which gets more replies. Wording is verbatim from the client, only
+# "[Name]" swapped for this app's own {greeting_name} merge field (same
+# placeholder role as everywhere else) -- do not otherwise edit this copy.
+# "Original" is the pre-existing default above, folded in here so every
+# option lives in one picker (see app.py's Send Texts tab).
+SMS_TEMPLATE_VARIANTS: Dict[str, Dict[str, str]] = {
+    "Bookkeeping": {
+        "Original": SMS_TEMPLATES["Bookkeeping"],
+        "Variant 1 (profit vs. bank balance)": (
+            "Hey {greeting_name}, checking your bank app isn't the same as knowing your actual profit. "
+            "I help business owners rescue months of backlogged books so they can stop guessing. "
+            "How far behind is your bookkeeping right now?"
+        ),
+        "Variant 2 (backlog anxiety)": (
+            "Hi {greeting_name}, there is a specific kind of background anxiety that comes from being "
+            "months behind on your financials. We specialize in rapid cleanup and backlog recovery so "
+            "you can breathe again. Are you currently doing the books yourself?"
+        ),
+        "Variant 3 (receipts mess)": (
+            "Hey {greeting_name}, whether your receipts are stuffed in a glovebox, a desk drawer, or "
+            "drowning in your email, lagging books are suffocating your cash flow. We take over the "
+            "backlog and get you 100% caught up. Ready to hand over the financials mess?"
+        ),
+    },
+}
 
-def get_default_sms_for_service(service: str) -> str:
-    return SMS_TEMPLATES.get(service, GENERIC_SMS_TEMPLATE)
+DEFAULT_SMS_VARIANT = "Original"
 
 
-def _load_sms_overrides() -> Dict[str, str]:
-    if os.path.exists(CUSTOM_SMS_TEMPLATES_PATH):
-        try:
-            with open(CUSTOM_SMS_TEMPLATES_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+def get_sms_variants(service: str) -> Dict[str, str]:
+    """Every variant name -> its built-in default text for this service, for populating a picker."""
+    return SMS_TEMPLATE_VARIANTS.get(service, {DEFAULT_SMS_VARIANT: SMS_TEMPLATES.get(service, GENERIC_SMS_TEMPLATE)})
 
 
-def load_sms_template(service: str) -> str:
+def get_default_sms_for_service(service: str, variant: str = DEFAULT_SMS_VARIANT) -> str:
+    return get_sms_variants(service).get(variant, GENERIC_SMS_TEMPLATE)
+
+
+def _load_sms_overrides() -> Dict[str, Dict[str, str]]:
+    """
+    {service: {variant: template_text}}. Transparently migrates the old
+    pre-2026-09-18 flat format ({service: template_text}, back when there
+    was only one template per service) by treating that saved string as
+    the "Original" variant's override -- so an already-customized
+    template isn't silently lost/reverted by the upgrade to multi-variant
+    support.
+    """
+    if not os.path.exists(CUSTOM_SMS_TEMPLATES_PATH):
+        return {}
+    try:
+        with open(CUSTOM_SMS_TEMPLATES_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    migrated = {}
+    for service, value in raw.items():
+        if isinstance(value, str):
+            migrated[service] = {DEFAULT_SMS_VARIANT: value}
+        elif isinstance(value, dict):
+            migrated[service] = value
+    return migrated
+
+
+def load_sms_template(service: str, variant: str = DEFAULT_SMS_VARIANT) -> str:
     overrides = _load_sms_overrides()
-    saved = overrides.get(service, "")
+    saved = overrides.get(service, {}).get(variant, "")
     if saved.strip():
         return saved
-    return get_default_sms_for_service(service)
+    return get_default_sms_for_service(service, variant)
 
 
-def save_sms_template(service: str, template: str) -> None:
+def save_sms_template(service: str, template: str, variant: str = DEFAULT_SMS_VARIANT) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     overrides = _load_sms_overrides()
-    overrides[service] = template
+    overrides.setdefault(service, {})[variant] = template
     with open(CUSTOM_SMS_TEMPLATES_PATH, "w", encoding="utf-8") as f:
         json.dump(overrides, f, indent=2)
 
 
-def reset_sms_template(service: str) -> None:
+def reset_sms_template(service: str, variant: str = DEFAULT_SMS_VARIANT) -> None:
     overrides = _load_sms_overrides()
-    if service in overrides:
-        del overrides[service]
+    if service in overrides and variant in overrides[service]:
+        del overrides[service][variant]
+        if not overrides[service]:
+            del overrides[service]
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(CUSTOM_SMS_TEMPLATES_PATH, "w", encoding="utf-8") as f:
             json.dump(overrides, f, indent=2)
 
 
-def render_sms_for_lead(lead: Dict) -> str:
+def render_sms_for_lead(lead: Dict, variant: str = DEFAULT_SMS_VARIANT) -> str:
     """Same 'use this lead's own service' logic as render_for_lead, for SMS."""
     from . import mailer
 
-    tpl = load_sms_template(lead.get("service", "") or "Bookkeeping")
+    tpl = load_sms_template(lead.get("service", "") or "Bookkeeping", variant)
     fields = _merge_fields(lead)
     fields.update(mailer.get_sender_info())
     try:

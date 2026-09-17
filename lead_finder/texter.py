@@ -30,7 +30,7 @@ import requests
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 SENT_TEXT_LOG_PATH = os.path.join(DATA_DIR, "sent_text_log.csv")
 
-SENT_TEXT_LOG_COLUMNS = ["phone", "company_name", "service", "status", "error", "sent_at"]
+SENT_TEXT_LOG_COLUMNS = ["phone", "company_name", "service", "variant", "status", "error", "sent_at"]
 
 EIGHTXEIGHT_API_BASE = "https://sms.8x8.com/api/v1"
 REQUEST_TIMEOUT = 40
@@ -142,6 +142,18 @@ def _ensure_sent_text_log():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(SENT_TEXT_LOG_PATH):
         pd.DataFrame(columns=SENT_TEXT_LOG_COLUMNS).to_csv(SENT_TEXT_LOG_PATH, index=False)
+        return
+    # Migrate an older log missing a newer column (e.g. "variant", added
+    # 2026-09-18) — rewrite its header/rows with the new column added
+    # (blank for existing rows) BEFORE any append happens. Without this,
+    # record_sent_text's mode="a" append would silently misalign columns
+    # against the file's still-old header row.
+    existing = pd.read_csv(SENT_TEXT_LOG_PATH, dtype=str)
+    if list(existing.columns) != SENT_TEXT_LOG_COLUMNS:
+        for col in SENT_TEXT_LOG_COLUMNS:
+            if col not in existing.columns:
+                existing[col] = ""
+        existing[SENT_TEXT_LOG_COLUMNS].to_csv(SENT_TEXT_LOG_PATH, index=False)
 
 
 def load_sent_text_log() -> pd.DataFrame:
@@ -155,10 +167,11 @@ def load_sent_text_log() -> pd.DataFrame:
     return df.fillna("")
 
 
-def record_sent_text(phone: str, company_name: str, service: str, status: str, error: str = "") -> None:
+def record_sent_text(phone: str, company_name: str, service: str, status: str, error: str = "",
+                      variant: str = "") -> None:
     _ensure_sent_text_log()
     row = pd.DataFrame([{
-        "phone": phone, "company_name": company_name, "service": service,
+        "phone": phone, "company_name": company_name, "service": service, "variant": variant,
         "status": status, "error": error, "sent_at": pd.Timestamp.utcnow().isoformat(),
     }])
     row.to_csv(SENT_TEXT_LOG_PATH, mode="a", header=False, index=False)

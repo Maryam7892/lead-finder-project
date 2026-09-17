@@ -109,7 +109,7 @@ def _run_text_batch_in_background(texting_config, jobs, delay_seconds, state):
     def progress_cb(done, total, result):
         status = "sent" if result["success"] else "failed"
         texter.record_sent_text(result["to"], result["company_name"], result["service"],
-                                 status, result.get("error", ""))
+                                 status, result.get("error", ""), variant=result.get("variant", ""))
         state["done"] = done
         state["total"] = total
     results = texter.send_text_batch(texting_config, jobs, delay_seconds=delay_seconds, progress_cb=progress_cb)
@@ -492,6 +492,26 @@ with tab_find:
             completed_units = 0
             run_start_time = time.time()
 
+            # --- Stop button: clicking ANY widget makes Streamlit abort
+            # the currently-running script and start a fresh one — that's
+            # how this actually stops the search, there's nothing special
+            # to wire up for the click itself. What makes it a good stop
+            # rather than a data-losing one is the incremental save below:
+            # after every completed (state, business type) unit, whatever
+            # has been kept so far is written to leads.csv, not just once
+            # at the very end. So stopping mid-run leaves the database and
+            # Send tabs holding every FULLY finished unit's leads, already
+            # High-confidence-filtered if that's on — just without the
+            # browser-retry pass and the auto-archived Excel snapshot,
+            # both of which normally only happen once, after the whole
+            # run completes. Do either manually afterward: "Retry with a
+            # real browser" in Lead Database, or its Download-as-Excel
+            # button. ---
+            st.button("🛑 Stop search (keeps every business type fully "
+                      "finished so far — skips browser-retry & archiving)")
+            st.caption("Stopping does NOT undo anything already found — it just ends the run early. "
+                       "Whatever's fully done gets saved right away, unit by unit, as the run goes.")
+
             with st.status("🔍 Starting search...", expanded=True) as search_status:
                 unit_progress = st.progress(0.0)
                 elapsed_box = st.empty()
@@ -683,6 +703,23 @@ with tab_find:
                         _touch_elapsed()
                         st.write(f"✅ **{unit_label}**: kept {len(kept)} lead(s) "
                                  f"({completed_units}/{total_units} done)")
+
+                        # Incremental save — see the Stop button's comment
+                        # above for why: this is what makes stopping early
+                        # (or any other interruption) lose at most the ONE
+                        # unit still in flight, never the whole run. Mirrors
+                        # the final save's own High-only purge so a stopped
+                        # run's leads.csv looks like a smaller, correct
+                        # version of the full run's output, not raw/
+                        # unfiltered. Superseded by the real final save
+                        # (with browser-retry applied) if the run finishes
+                        # normally — this is purely a safety net.
+                        rows_so_far = (
+                            [r for r in all_new_rows if r.get("confidence_label") == "High"]
+                            if auto_purge_low_confidence else list(all_new_rows)
+                        )
+                        if rows_so_far:
+                            st.session_state.results_df = storage.save_leads(rows_so_far, replace=True)
 
                 search_status.update(
                     label=f"✅ Search complete — {_format_elapsed(time.time() - run_start_time)} total",
@@ -1506,23 +1543,46 @@ with tab_text:
                        "with its own service's SMS template automatically.")
 
             active_sms_service = service or "Bookkeeping"
-            sms_widget_key = f"sms_editor__{active_sms_service}"
-            if sms_widget_key not in st.session_state:
-                st.session_state[sms_widget_key] = email_template.load_sms_template(active_sms_service)
 
-            st.markdown(f"**SMS template for {active_sms_service}**")
+            # A/B/C variant picker (added 2026-09-18) — the client supplied
+            # 3 alternate message bodies to run across different states/
+            # business types and compare reply rates ("Original" is the
+            # pre-existing default). Whichever variant is selected here
+            # applies to the preview, test send, AND the real batch send
+            # below — so testing "variant X on state Y" is just: filter
+            # Lead Database to state Y, pick variant X here, send. Wording
+            # is the client's own verbatim; edit at your own risk here —
+            # the editor below will let you, but the point of an A/B/C
+            # test is comparing the ORIGINAL wording as given.
+            sms_variants = email_template.get_sms_variants(active_sms_service)
+            variant_names = list(sms_variants.keys())
+            variant_picker_key = f"sms_variant_choice__{active_sms_service}"
+            if variant_picker_key not in st.session_state or st.session_state[variant_picker_key] not in variant_names:
+                st.session_state[variant_picker_key] = variant_names[0]
+            active_sms_variant = st.selectbox(
+                "Message variant to use for this batch", variant_names, key=variant_picker_key,
+                help="Applies to the preview below, the test text, and the real send — all from the "
+                     "same variant. Switch variants and send separately per state/business type to "
+                     "run the A/B/C test across them.",
+            )
+
+            sms_widget_key = f"sms_editor__{active_sms_service}__{active_sms_variant}"
+            if sms_widget_key not in st.session_state:
+                st.session_state[sms_widget_key] = email_template.load_sms_template(active_sms_service, active_sms_variant)
+
+            st.markdown(f"**SMS template — {active_sms_service} / {active_sms_variant}**")
             sms_template_text = st.text_area("SMS Template", height=100, key=sms_widget_key,
                                               help="Keep it short — carriers charge/segment by length, "
                                                    "and it's read at a glance, not skimmed like an email.")
             tcol1, tcol2 = st.columns(2)
             with tcol1:
                 if st.button("💾 Save SMS template", type="primary"):
-                    email_template.save_sms_template(active_sms_service, sms_template_text)
-                    st.success(f"Saved for {active_sms_service}.")
+                    email_template.save_sms_template(active_sms_service, sms_template_text, active_sms_variant)
+                    st.success(f"Saved {active_sms_variant} for {active_sms_service}.")
             with tcol2:
                 if st.button("↺ Reset SMS to default"):
-                    email_template.reset_sms_template(active_sms_service)
-                    st.session_state[sms_widget_key] = email_template.get_default_sms_for_service(active_sms_service)
+                    email_template.reset_sms_template(active_sms_service, active_sms_variant)
+                    st.session_state[sms_widget_key] = email_template.get_default_sms_for_service(active_sms_service, active_sms_variant)
                     st.rerun()
 
             st.markdown("---")
@@ -1578,7 +1638,7 @@ with tab_text:
             if not eligible.empty:
                 preview_rows = []
                 for _, row in eligible.head(10).iterrows():
-                    body = email_template.render_sms_for_lead(row.to_dict())
+                    body = email_template.render_sms_for_lead(row.to_dict(), active_sms_variant)
                     preview_rows.append({
                         "Company": row["company_name"], "Confidence": row["confidence_label"],
                         "State": row["state"], "Target Type": row.get("target_vertical", ""),
@@ -1596,7 +1656,9 @@ with tab_text:
                 # time, with "Custom..." always available. SMS templates
                 # are service-level only (no per-vertical split like email's
                 # VERTICAL_TEMPLATES — see email_template.load_sms_template),
-                # so unlike Send Emails this only ever needs ONE test row.
+                # so unlike Send Emails this only ever needs ONE test row —
+                # the variant picker above covers what per-vertical testing
+                # covers for email.
                 TEST_TEXT_OPTIONS = [
                     n.strip() for n in os.getenv("TEST_TEXT_NUMBERS", "").split(",") if n.strip()
                 ] + ["Custom..."]
@@ -1613,10 +1675,10 @@ with tab_text:
                             "company_name": "Test Company", "service": active_sms_service,
                             "state": state_names[0] if state_names else "Texas", "owner_name": "",
                         }
-                        body = email_template.render_sms_for_lead(test_lead)
+                        body = email_template.render_sms_for_lead(test_lead, active_sms_variant)
                         success, error = texter.send_text(texting_config, test_number.strip(), f"[TEST] {body}")
                         if success:
-                            st.success(f"Test text sent to {test_number.strip()}.")
+                            st.success(f"Test text ({active_sms_variant}) sent to {test_number.strip()}.")
                         else:
                             st.error(f"Send failed: {error}")
             with tcol2:
@@ -1633,13 +1695,14 @@ with tab_text:
                              disabled=not confirm_text or is_running_t, key="send_texts_btn"):
                     jobs = []
                     for _, row in eligible.iterrows():
-                        body = email_template.render_sms_for_lead(row.to_dict())
+                        body = email_template.render_sms_for_lead(row.to_dict(), active_sms_variant)
                         e164 = texter.to_e164(row["phone"])
                         if not e164:
                             continue
                         jobs.append({
                             "to": e164, "body": body,
                             "company_name": row["company_name"], "service": row["service"],
+                            "variant": active_sms_variant,
                         })
 
                     new_state = {"done": 0, "total": len(jobs), "results": [], "complete": False}

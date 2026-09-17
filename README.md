@@ -203,7 +203,14 @@ to pick up a newly created env.
   scraped right now, and a running log of each combination as it finishes
   ("kept 5 leads") - so on a long multi-state/multi-vertical run you can
   actually tell it's progressing rather than wondering if it's hung. It
-  collapses to a one-line checkmark once the run finishes.
+  collapses to a one-line checkmark once the run finishes. A **Stop
+  search** button stays available the whole time - every business type
+  that's fully finished by the time you click it is already saved (it
+  saves incrementally as it goes, not just once at the end), so stopping
+  early loses at most whatever single business type was still in
+  progress. Stopping skips the browser-retry pass and the auto-archived
+  Excel snapshot for that run; both have manual equivalents in Lead
+  Database if you want them afterward.
 - **Lead Database tab** - browse the results of your **most recent search**
   (each search replaces the database), filter by state, target type and
   confidence, and download as CSV or Excel (.xlsx) - same option on the
@@ -678,6 +685,16 @@ The **Send Texts** tab sends real SMS through your own **8x8 Connect**
 account - same "off until you configure it" pattern as email, and defaults
 to texting only leads that **don't have an email** (uncheck "Only leads
 with no email" to widen that).
+
+**A/B/C testing message variants:** a "Message variant to use for this
+batch" picker lets you choose between the default message and any
+alternate versions (e.g. different opening lines) before sending - the
+same picker drives the preview, the test text, and the real send, so
+switching it and sending again is how you run different wording against
+different states or business types to see what gets more replies. Every
+sent text records which variant it used (visible in "Sent text history"
+at the bottom of the tab), so replies can be traced back to which message
+earned them.
 
 **Setup:** copy `.env.example` to `.env` and fill in `EIGHTXEIGHT_API_KEY`
 and `EIGHTXEIGHT_SUBACCOUNT_ID` from the

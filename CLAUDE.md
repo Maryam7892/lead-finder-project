@@ -171,12 +171,42 @@ verticals, otherwise the service itself):
    High-only is intended — phone-only "High" rows (a real, in-state phone,
    no email) are wanted; do **not** add an email requirement to the High
    gate.
+7a. **Stop button + incremental saving** (added 2026-09-18) — a
+   "🛑 Stop search" button is rendered once, before the per-(state,
+   business type) loop starts, and stays visible/clickable for the whole
+   run (`app.py`, `run_clicked` block). Clicking it doesn't call any stop
+   logic of its own — any Streamlit widget interaction during a running
+   script aborts that script and starts a fresh one, and on that fresh
+   run `run_clicked` (tied to the Find Companies button) is False, so the
+   search block is simply never re-entered. What makes this a *good*
+   stop rather than a data-losing one: after every unit fully completes
+   (right where step 9's `st.write("✅ ...")` log line fires), whatever's
+   in `all_new_rows` so far is immediately persisted —
+   `storage.save_leads(rows_so_far, replace=True)`, with the same
+   High-confidence purge applied inline if `auto_purge_low_confidence` is
+   on — not just once at the very end. So an abort (Stop, or literally
+   any other interruption — browser closed, network drop) loses at most
+   the ONE unit that was still in flight; every unit that finished stays
+   saved and immediately usable from Lead Database/Send Emails/Send
+   Texts. Skipped by a stop: the browser-retry pass (step 6, only runs
+   after the whole loop) and the auto-archived Excel snapshot (step 8
+   below, also only on full completion) — both have manual equivalents
+   already in the UI ("Retry with a real browser" / "Download as Excel"
+   in Lead Database) if wanted after a partial run. Verified live: ran a
+   real 2-vertical search, let unit 1 finish (18 kept, 5 after the
+   High-only purge), clicked Stop mid-way through unit 2's first query,
+   and confirmed — in a brand new browser session reading straight from
+   disk — that exactly those 5 rows were there and nothing from the
+   incomplete unit was.
 8. **Store — REPLACE**: `storage.save_leads(kept, replace=True)` writes
    `data/leads.csv` to contain **exactly this run's kept rows**. Any
    previous run's data is discarded. The app never accumulates leads across
    runs. Dedupe within the run is by `domain` (`keep="last"`). If a run
    keeps **zero** rows, the previous file is left untouched and a warning
-   is shown (so a failed/empty search doesn't wipe good data).
+   is shown (so a failed/empty search doesn't wipe good data). (This is
+   the same save the incremental step above already does per-unit — this
+   is just the final call, now additionally covering the browser-retry
+   pass's recovered leads.)
    **Also archives** (added 2026-09-15, non-critical — a failure here
    doesn't affect the save above): `storage.save_export_snapshot` writes
    the same kept rows as a standalone `.xlsx` into `data/exports/`, named
@@ -783,6 +813,37 @@ True if any of:
 subject line, no HTML, no signature — plain text, kept short (carriers
 segment by length).
 
+**SMS A/B/C variants** (`SMS_TEMPLATE_VARIANTS`, added 2026-09-18) — a
+second axis alongside service, only for SMS: `{service: {variant_name:
+template_text}}`. Bookkeeping currently has 4 — `"Original"` (the
+pre-existing default above) plus 3 the client supplied verbatim to test
+against each other across different states/business types and see which
+gets more replies (`"Variant 1 (profit vs. bank balance)"`, `"Variant 2
+(backlog anxiety)"`, `"Variant 3 (receipts mess)"`). Only their own
+`"[Name]"` placeholder was touched, swapped for `{greeting_name}` (same
+role as everywhere else in this file) — **the wording itself must not be
+edited**, that's the whole point of an A/B/C test. `load_sms_template`/
+`save_sms_template`/`reset_sms_template`/`get_default_sms_for_service`
+all take an optional `variant` param (default `"Original"`, i.e. every
+one of these functions behaves exactly as before if a caller doesn't
+pass one). `data/custom_sms_templates.json`'s schema changed from
+`{service: text}` to `{service: {variant: text}}` — `_load_sms_overrides`
+transparently migrates an old flat-format file by treating that string as
+the `"Original"` variant's override, so an already-customized template
+isn't lost. Send Texts tab: a "Message variant to use for this batch"
+picker selects which variant renders for the preview, the test text, and
+the real send — all three use the same one. Running the actual A/B/C
+test across states means: filter Lead Database to a state, pick a
+variant, send; repeat with a different state/variant. `render_sms_for_lead`
+also takes a `variant` param now (default `"Original"`) and
+`texter.record_sent_text`/`SENT_TEXT_LOG_COLUMNS` gained a `variant`
+column so a later reply can be traced back to which message earned it —
+without this the whole point of the test (comparing reply rates) would be
+unmeasurable once time passes. `_ensure_sent_text_log` migrates an
+existing log file missing that column before any append, the same
+"don't lose old data, don't misalign the CSV" concern as the templates
+file above.
+
 **Merge fields** (`_merge_fields`): `{company_name}` (→ "there" if missing),
 `{service}`, `{service_lower}`, `{state}` (→ "your area"), `{phone}`,
 `{email}`, `{website}`, `{owner_name}`, `{greeting_name}`. SMS templates
@@ -838,9 +899,9 @@ happens automatically.
 |---|---|---|---|
 | `leads.csv` | `storage.save_leads` | Columns in `storage.COLUMNS`: company_name, website, domain, phone, email, all_emails_found, status, service, target_vertical, state, search_query, name_source, email_source, email_domain_match, phone_source, confidence_score, confidence_label, owner_name, linkedin_url. **Holds one run only** — a search run rewrites the whole file (`replace=True`). Deduped by `domain`, keep last. Empty cells normalized (`nan`/`none`/NaN → `""`). | yes |
 | `custom_email_templates.json` | Email Template tab | `{service: template_string}` | yes (via `data/leads.csv` line only — check `.gitignore`) |
-| `custom_sms_templates.json` | Send Texts tab | `{service: template_string}` | — |
+| `custom_sms_templates.json` | Send Texts tab | `{service: {variant: template_string}}` (changed 2026-09-18 for A/B/C variants — see §11; an old flat `{service: template_string}` file is auto-migrated on read) | — |
 | `sent_log.csv` | `mailer.record_sent` | domain, email, company_name, service, subject, status, error, sent_at. **Dedup key = domain.** | yes |
-| `sent_text_log.csv` | `texter.record_sent_text` | phone, company_name, service, status, error, sent_at. **Dedup key = phone (E.164 string).** `dtype=str` on load is essential (a `+1512...` parses as int otherwise). | yes |
+| `sent_text_log.csv` | `texter.record_sent_text` | phone, company_name, service, **variant** (added 2026-09-18, blank for pre-existing rows), status, error, sent_at. **Dedup key = phone (E.164 string).** `dtype=str` on load is essential (a `+1512...` parses as int otherwise). | yes |
 | `suppression_list.csv` | `mailer.add_to_suppression` | value, added_at. One list, **shared across email + SMS.** Matches on exact email, exact domain, or normalized phone digits. | — |
 | `sent_records/<vertical>/<YYYY-MM-DD>.csv` | `app._write_daily_sent_records_csv` | Human-readable per-vertical, per-day export of email sends. Additive — `sent_log.csv` is still the dedup source. Vertical folder name is sanitized; leads with no vertical → `General`. | — |
 | `exports/<date>_<businesstypes>_<states>.xlsx` | `storage.save_export_snapshot`, once per completed search run | Same columns as `leads.csv`, frozen at that run's end. **Accumulates** — one file per run, never overwritten by the next search (unlike `leads.csv`). Read back by `storage.load_export_snapshots` when Send Emails/Send Texts picks one or more saved runs to send from instead of the live database. | yes |
@@ -985,9 +1046,11 @@ anything else surfaces `HTTP <code>: <body>`. Phone → E.164 via
 mirroring Send Emails' test-address dropdown — added 2026-09-15, replacing
 a plain always-Custom text input. Unlike email, this is a **single** row
 regardless of how many target verticals are in the working set: SMS
-templates are service-level only (`email_template.load_sms_template(service)`,
-no `target_vertical` parameter — see §11), so there's no per-vertical
-template to test separately. Message prefixed `[TEST]`.
+templates are service-level only (`email_template.load_sms_template(service,
+variant)`, no `target_vertical` parameter — see §11), so there's no
+per-vertical template to test separately — what email covers with
+per-vertical rows, SMS covers with the variant picker (§11) instead,
+which the test send also respects. Message prefixed `[TEST]`.
 
 ### Browser re-scrape (`browser_scrape.py`) — automatic + manual
 
@@ -1127,6 +1190,29 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-18 (Stop button + incremental saving)** — User picked this up
+  from a standing suggestions list. See §3 step 7a for the full mechanism.
+  Short version: a Stop button that works by letting Streamlit's own
+  abort-on-any-interaction behavior do the actual stopping, made safe by
+  saving every fully-completed (state, business type) unit's leads to
+  `leads.csv` as it goes rather than only once at the end — so stopping
+  early (or any other interruption) never loses more than one in-flight
+  unit. Verified against a live 2-vertical run: stopped mid-way through
+  unit 2, confirmed exactly unit 1's High-confidence leads survived in a
+  fresh browser session reading from disk.
+- **2026-09-18 (SMS A/B/C variants)** — Client supplied 3 alternate SMS
+  bodies to test against the existing default across different states/
+  business types and see which gets more replies. See §11 for the full
+  mechanism (`SMS_TEMPLATE_VARIANTS`, migrated `custom_sms_templates.json`
+  schema, variant picker in Send Texts, new `variant` column on
+  `sent_text_log.csv`). Wording is the client's own, verbatim — only their
+  `[Name]` placeholder was mapped to this app's existing `{greeting_name}`
+  merge field; do not edit the copy itself without the client asking.
+  Verified end-to-end against a live app instance: all 4 variants
+  (Original + 3 new) appear in the picker, switching variants correctly
+  swaps the editable template text, and the existing custom "Original"
+  template (already saved from a prior session) survived the schema
+  migration intact.
 - **2026-09-18 (detailed Find Leads progress UI)** — User request: the old
   progress feedback (one bar advancing once per STATE, a text line per
   query) could sit visually frozen for a long time on a multi-vertical run
