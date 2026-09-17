@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from lead_finder import search, scrape, storage, email_template, blocklist, mailer, osm_source, extract, area_codes, texter, hubspot_crm, browser_scrape, junk_filter
+from lead_finder import search, scrape, storage, email_template, blocklist, mailer, osm_source, extract, area_codes, texter, browser_scrape, junk_filter
 from lead_finder.states import (
     US_STATES, ACTIVE_SERVICES, get_search_target,
     get_major_cities, get_target_verticals, get_extra_metro_areas,
@@ -192,8 +192,6 @@ if "email_send_state" not in st.session_state:
     st.session_state.email_send_state = None
 if "text_send_state" not in st.session_state:
     st.session_state.text_send_state = None
-if "hubspot_push_state" not in st.session_state:
-    st.session_state.hubspot_push_state = None
 if "browser_retry_state" not in st.session_state:
     st.session_state.browser_retry_state = None
 
@@ -894,71 +892,6 @@ with tab_db:
             )
         st.caption("SMS-ready excludes toll-free (800/888/etc.) and unrecognized area codes to stay strict — "
                    "loosen this yourself in the CSV if you want to include those too.")
-
-        st.markdown("---")
-        st.markdown("**HubSpot CRM**")
-        hubspot_config = hubspot_crm.get_hubspot_config()
-        if not hubspot_config:
-            st.info(
-                "Not connected. Add this to your `.env` file (see `.env.example`), then restart the app:\n\n"
-                "```\nHUBSPOT_ACCESS_TOKEN=pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\n```\n\n"
-                "Create one under your HubSpot account's Settings → Integrations → Private Apps, with "
-                "`crm.objects.contacts.read`, `crm.objects.contacts.write`, and `crm.schemas.contacts.write` "
-                "scopes. **HubSpot's free tier caps at 1,000 contacts/month** — pushing a large batch can "
-                "hit that fast.",
-                icon="🔶",
-            )
-        else:
-            pushable = filtered[filtered["email"].astype(str).str.strip().str.len() > 0]
-            st.caption(f"{len(pushable)} of the {len(filtered)} leads shown above have an email "
-                       "(HubSpot contacts are keyed by email — leads without one can't be pushed this way).")
-            hs_state = st.session_state.get("hubspot_push_state")
-            hs_running = hs_state is not None and not hs_state.get("complete", False)
-            if st.button("📤 Push these leads to HubSpot", disabled=pushable.empty or hs_running):
-                ok, err = hubspot_crm.ensure_custom_properties(hubspot_config)
-                if not ok:
-                    st.warning(f"Couldn't confirm custom properties exist (continuing anyway): {err}")
-                new_state = {"done": 0, "total": len(pushable), "results": [], "complete": False}
-                st.session_state.hubspot_push_state = new_state
-
-                def _run_hubspot_push(cfg, leads, state):
-                    def cb(done, total, result):
-                        state["done"] = done
-                        state["total"] = total
-                    state["results"] = hubspot_crm.push_leads_batch(cfg, leads, progress_cb=cb)
-                    state["complete"] = True
-
-                threading.Thread(
-                    target=_run_hubspot_push,
-                    args=(hubspot_config, pushable.to_dict("records"), new_state),
-                    daemon=True,
-                ).start()
-                st.rerun()
-
-            hs_state = st.session_state.get("hubspot_push_state")
-            if hs_state is not None:
-                done, total = hs_state["done"], hs_state["total"]
-                if total:
-                    st.progress(done / total, text=f"{done}/{total} pushed" + (" — complete" if hs_state["complete"] else ""))
-                if hs_state["complete"]:
-                    results = hs_state["results"]
-                    ok_count = sum(1 for r in results if r["success"])
-                    fail_count = len(results) - ok_count
-                    if fail_count == 0:
-                        st.success(f"Pushed {ok_count} contacts to HubSpot.")
-                    else:
-                        st.warning(f"Pushed {ok_count}, failed {fail_count}.")
-                        st.dataframe(pd.DataFrame([
-                            {"company": r["company_name"], "email": r["email"], "error": r["error"]}
-                            for r in results if not r["success"]
-                        ]), use_container_width=True, hide_index=True)
-                    if st.button("Clear this status", key="clear_hubspot_push_state"):
-                        st.session_state.hubspot_push_state = None
-                        st.rerun()
-                else:
-                    st.caption("Pushing in the background — safe to switch tabs, come back and refresh to check.")
-                    if st.button("🔄 Refresh progress", key="refresh_hubspot_progress"):
-                        st.rerun()
 
         st.markdown("---")
         st.markdown("**Retry with a real browser**")

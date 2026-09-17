@@ -28,7 +28,7 @@ re-deriving all of this from the source each time.
 **What it is:** a Streamlit dashboard that finds prospective B2B clients by
 service + US state, scrapes their publicly listed contact info, scores how
 trustworthy that info is, drafts tailored outreach per lead, and can send
-it by email (SMTP) or SMS (8x8), plus push to HubSpot.
+it by email (SMTP) or SMS (8x8).
 
 **Direction:** currently a single-user local tool; being turned into a
 product, and ultimately into an **agent-driven** system where searching,
@@ -38,8 +38,8 @@ through manually. This file is the contract that makes that possible.
 **Active scope right now:**
 - One active service: **Bookkeeping** (`states.ACTIVE_SERVICES`).
 - Bookkeeping fans out across **8 target verticals** (see §4).
-- Email sending: configured and live. SMS: code complete, needs 8x8
-  credentials. HubSpot: token-gated.
+- Email sending: configured and live. SMS: configured and live (8x8
+  credentials added 2026-09-15).
 
 **Guiding principles baked into the code:**
 - *Precision over recall* for anything that feeds real outreach (owner
@@ -87,7 +87,6 @@ through manually. This file is the contract that makes that possible.
 | `email_template.py` | Per-service + per-vertical email templates, SMS templates, merge-field render to text/HTML | Send anything |
 | `mailer.py` | SMTP send, rate-limited batch, sent-log, shared suppression list, HTML signature builder | Send without an explicit call |
 | `texter.py` | 8x8 Connect SMS send, rate-limited batch, sent-text-log, E.164 formatting | Send without an explicit call |
-| `hubspot_crm.py` | Push leads to HubSpot as Contacts, auto-create custom properties | Push on module load |
 
 ---
 
@@ -875,7 +874,6 @@ All optional for finding/scraping. Required only for the feature named.
 | `EIGHTXEIGHT_API_KEY` + `EIGHTXEIGHT_SUBACCOUNT_ID` | SMS | **Both** required or `get_active_texting_config()` returns None. From developer.8x8.com/connect. |
 | `EIGHTXEIGHT_SOURCE` | SMS | Optional Sender ID shown as "from". Blank = account default. |
 | `TEST_TEXT_NUMBERS` | SMS | Optional comma-separated list for the "Send test text to" dropdown (Send Texts tab), same pattern as `TEST_EMAIL_ADDRESSES`. Blank = only "Custom..." is offered. Added 2026-09-15. |
-| `HUBSPOT_ACCESS_TOKEN` | HubSpot | Private App token (`pat-...`), scopes `crm.objects.contacts.read/write` + `crm.schemas.contacts.write`. |
 
 `app.py` calls `load_dotenv(override=True)` — `.env` beats a stray shell
 export of the same name. Restart the app after editing `.env`.
@@ -990,16 +988,6 @@ regardless of how many target verticals are in the working set: SMS
 templates are service-level only (`email_template.load_sms_template(service)`,
 no `target_vertical` parameter — see §11), so there's no per-vertical
 template to test separately. Message prefixed `[TEST]`.
-
-### HubSpot (Lead Database tab, `hubspot_crm.py`)
-
-Push the currently-filtered leads that **have an email** (HubSpot contacts
-are keyed by email). `ensure_custom_properties` first (creates 4
-`lead_finder_*` contact properties; 409 = already exists = fine).
-`push_lead`: POST contact; on 409, PATCH by `email` as `idProperty`. Maps
-`email/company/phone`, `lifecyclestage=lead`, the 4 custom props, and splits
-`owner_name` into first/last. 0.5s between calls. **HubSpot free tier caps
-at 1,000 contacts/month** — not worked around here.
 
 ### Browser re-scrape (`browser_scrape.py`) — automatic + manual
 
@@ -1139,6 +1127,17 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-18 (HubSpot removed entirely)** — User request: `hubspot_crm.py`
+  deleted, its `app.py` UI section (Lead Database tab "HubSpot CRM" block,
+  the `hubspot_crm` import, `hubspot_push_state` session-state init) and
+  the `HUBSPOT_ACCESS_TOKEN` line in `.env` all removed. CLAUDE.md and
+  README updated to match (module table, env var table, §14 HubSpot
+  subsection, project-tree listing, §1's product description). Historical
+  changelog entries that mention `hubspot_crm.py` were left as-is — they're
+  a record of what happened at the time, not living documentation. Also
+  corrected a stale line while in §1: SMS was still described as "code
+  complete, needs 8x8 credentials" even though the 2026-09-15 entry above
+  already recorded those credentials being added and the tab going live.
 - **2026-09-15 (upload leads from your own computer to send from)** —
   Extended the same-day "send from a saved run" feature: Send Emails and
   Send Texts each gained a multi-file uploader (`st.file_uploader`,

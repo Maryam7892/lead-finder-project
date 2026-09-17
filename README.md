@@ -730,7 +730,6 @@ lead_finder_project/
 │   ├── email_template.py         # per-service email + SMS template rendering + save/load
 │   ├── mailer.py                 # SMTP sending, sent-log, shared suppression list
 │   ├── texter.py                 # 8x8 Connect SMS sending, sent-log, E.164 formatting
-│   ├── hubspot_crm.py            # push leads to HubSpot as Contacts
 │   ├── browser_scrape.py         # Playwright fallback re-scrape for JS-rendered sites
 │   └── states.py                 # US states + service presets + target verticals + major cities
 ├── data/
