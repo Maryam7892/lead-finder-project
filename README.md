@@ -197,7 +197,13 @@ to pick up a newly created env.
 
 - **Find Leads tab** - pick a service (or type a custom one), pick one or
   more states (or check **Search all 50 states + DC**), adjust search depth,
-  and click **Find companies**. Progress bars show search and scrape status live.
+  and click **Find companies**. A live status panel opens and stays expanded
+  for the whole run: an overall progress bar across every state x business
+  type combination, elapsed time, exactly which query or which site is being
+  scraped right now, and a running log of each combination as it finishes
+  ("kept 5 leads") - so on a long multi-state/multi-vertical run you can
+  actually tell it's progressing rather than wondering if it's hung. It
+  collapses to a one-line checkmark once the run finishes.
 - **Lead Database tab** - browse the results of your **most recent search**
   (each search replaces the database), filter by state, target type and
   confidence, and download as CSV or Excel (.xlsx) - same option on the

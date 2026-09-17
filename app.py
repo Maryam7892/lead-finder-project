@@ -1,6 +1,7 @@
 import io
 import os
 import threading
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -24,6 +25,20 @@ def _to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Leads") -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return buf.getvalue()
+
+
+def _format_elapsed(seconds: float) -> str:
+    """'2m 14s' / '48s' — used by the Find Leads progress display so a long
+    run shows real elapsed time, not just a fraction, which is what
+    actually tells you "still working" apart from "stuck"."""
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 def _write_daily_sent_records_csv(results):
@@ -403,7 +418,6 @@ with tab_find:
             search_error_count = 0
             search_error_samples = []
             total_states = len(state_names)
-            outer_progress = st.progress(0.0, text="Starting search...")
 
             verticals = get_target_verticals(service)
             has_vertical_concept = verticals is not None
@@ -463,169 +477,217 @@ with tab_find:
                         icon="⏱️",
                     )
 
-            for state_idx, state_name in enumerate(state_names):
-                state_abbr = US_STATES.get(state_name, "")
-                cities = list(get_major_cities(state_name)) if use_city_queries else []
-                if use_city_queries and include_metro_neighborhoods:
-                    cities += [a for a in get_extra_metro_areas(state_name) if a not in cities]
+            # --- Detailed progress: everything below runs inside one
+            # st.status container so there's always a single, obvious
+            # "is this still working" signal — a spinner while running, a
+            # checkmark when done — plus a persistent scrollback log (every
+            # st.write call below stays visible in the expanded body) and a
+            # running elapsed-time readout. Before this, a long multi-
+            # vertical run only moved its one progress bar once per STATE,
+            # so it could sit visually frozen for a very long time while
+            # working through many business types within that state —
+            # indistinguishable from actually being stuck. Progress now
+            # advances once per (state, business type) unit instead. ---
+            total_units = max(total_states * max(len(targets), 1), 1)
+            completed_units = 0
+            run_start_time = time.time()
 
-                for target in targets:
-                    candidate_urls = {}  # domain -> {"url":, "name":, "query":, "phone":}
-                    web_candidate_urls = {}  # web-search's own findings, merged in after OSM (see below)
-                    osm_only_rows = []  # OSM businesses with no website — added directly, no scrape needed
-                    skipped_count = 0
-                    target_note = f" — {target['label']}" if verticals else ""
+            with st.status("🔍 Starting search...", expanded=True) as search_status:
+                unit_progress = st.progress(0.0)
+                elapsed_box = st.empty()
 
-                    status_box = st.empty()
+                def _touch_elapsed():
+                    elapsed_box.caption(f"⏱️ {_format_elapsed(time.time() - run_start_time)} elapsed")
 
-                    # --- OpenStreetMap: fetched in the BACKGROUND while web search
-                    # runs below, since it's an independent network call with no
-                    # dependency on the search results. Only the raw fetch happens
-                    # in the thread — everything is single-threaded again by the
-                    # time it's turned into candidate rows, after `.join()`, so
-                    # there's no concurrent-write risk on the dicts above. ---
-                    osm_holder = {"results": []}
+                _touch_elapsed()
 
-                    def _fetch_osm_bg(_tags=target["osm_tags"], _abbr=state_abbr):
-                        if use_osm and _tags:
-                            osm_holder["results"] = osm_source.query_osm_by_tags(_tags, _abbr)
+                for state_idx, state_name in enumerate(state_names):
+                    state_abbr = US_STATES.get(state_name, "")
+                    cities = list(get_major_cities(state_name)) if use_city_queries else []
+                    if use_city_queries and include_metro_neighborhoods:
+                        cities += [a for a in get_extra_metro_areas(state_name) if a not in cities]
 
-                    osm_thread = threading.Thread(target=_fetch_osm_bg, daemon=True)
-                    osm_thread.start()
+                    for target in targets:
+                        candidate_urls = {}  # domain -> {"url":, "name":, "query":, "phone":}
+                        web_candidate_urls = {}  # web-search's own findings, merged in after OSM (see below)
+                        osm_only_rows = []  # OSM businesses with no website — added directly, no scrape needed
+                        skipped_count = 0
+                        target_note = f" — {target['label']}" if verticals else ""
+                        unit_label = f"{state_name}{target_note}"
 
-                    # --- Web search: fills gaps OSM doesn't cover. Runs while the
-                    # OSM thread above fetches in parallel. ---
-                    queries = search.build_queries(
-                        service, state_name, search_target=target["search_target"],
-                        cities=cities, city_term_limit=target.get("city_term_limit"),
-                    )
-                    consecutive_no_new = 0
-                    for q in queries:
-                        status_box.info(f"Searching: \"{q}\"")
-                        hits = search.run_search(q, backend=backend, max_results=effective_results_per_query)
-                        added_this_query = 0
-                        for h in hits:
-                            url = h.get("url", "")
-                            title = h.get("title", "")
-                            snippet = h.get("snippet", "")
-                            if not url or "__ERROR__" in snippet:
-                                if "__ERROR__" in snippet:
-                                    # Don't spam one red box per failed query — count
-                                    # them and show a single summary after the run.
-                                    search_error_count += 1
-                                    if len(search_error_samples) < 3:
-                                        search_error_samples.append(snippet.replace("__ERROR__:", "").strip())
-                                continue
-                            dom = scrape._domain(url)
-                            if filter_directories and blocklist.should_skip_result(
-                                url, dom, title, snippet, service, keywords=target["keywords"]
-                            ):
-                                skipped_count += 1
-                                continue
-                            if dom and dom not in web_candidate_urls:
-                                web_candidate_urls[dom] = {"url": url, "name": title, "query": q, "phone": ""}
-                                added_this_query += 1
+                        # expanded=True must be re-passed on every .update() call —
+                        # leaving it out doesn't "leave it unchanged" the way the
+                        # label/state args do, it resets the container to collapsed
+                        # on the frontend (confirmed against the pinned Streamlit
+                        # 1.38.0's mutable_status_container.py: omitting `expanded`
+                        # clears that field on the delta proto rather than skipping
+                        # it, and the frontend treats a cleared bool field as False).
+                        search_status.update(
+                            label=f"🔍 Searching {unit_label} ({completed_units + 1}/{total_units})",
+                            expanded=True,
+                        )
+                        status_box = st.empty()
+
+                        # --- OpenStreetMap: fetched in the BACKGROUND while web search
+                        # runs below, since it's an independent network call with no
+                        # dependency on the search results. Only the raw fetch happens
+                        # in the thread — everything is single-threaded again by the
+                        # time it's turned into candidate rows, after `.join()`, so
+                        # there's no concurrent-write risk on the dicts above. ---
+                        osm_holder = {"results": []}
+
+                        def _fetch_osm_bg(_tags=target["osm_tags"], _abbr=state_abbr):
+                            if use_osm and _tags:
+                                osm_holder["results"] = osm_source.query_osm_by_tags(_tags, _abbr)
+
+                        osm_thread = threading.Thread(target=_fetch_osm_bg, daemon=True)
+                        osm_thread.start()
+
+                        # --- Web search: fills gaps OSM doesn't cover. Runs while the
+                        # OSM thread above fetches in parallel. ---
+                        queries = search.build_queries(
+                            service, state_name, search_target=target["search_target"],
+                            cities=cities, city_term_limit=target.get("city_term_limit"),
+                        )
+                        total_queries_this_target = len(queries)
+                        consecutive_no_new = 0
+                        for query_idx, q in enumerate(queries):
+                            status_box.info(f"{unit_label}: query {query_idx + 1}/{total_queries_this_target} "
+                                             f"— \"{q}\"")
+                            _touch_elapsed()  # every query — this IS the "still moving" signal
+                            hits = search.run_search(q, backend=backend, max_results=effective_results_per_query)
+                            added_this_query = 0
+                            for h in hits:
+                                url = h.get("url", "")
+                                title = h.get("title", "")
+                                snippet = h.get("snippet", "")
+                                if not url or "__ERROR__" in snippet:
+                                    if "__ERROR__" in snippet:
+                                        # Don't spam one red box per failed query — count
+                                        # them and show a single summary after the run.
+                                        search_error_count += 1
+                                        if len(search_error_samples) < 3:
+                                            search_error_samples.append(snippet.replace("__ERROR__:", "").strip())
+                                    continue
+                                dom = scrape._domain(url)
+                                if filter_directories and blocklist.should_skip_result(
+                                    url, dom, title, snippet, service, keywords=target["keywords"]
+                                ):
+                                    skipped_count += 1
+                                    continue
+                                if dom and dom not in web_candidate_urls:
+                                    web_candidate_urls[dom] = {"url": url, "name": title, "query": q, "phone": ""}
+                                    added_this_query += 1
+                                if len(web_candidate_urls) >= effective_max:
+                                    break
+                            consecutive_no_new = 0 if added_this_query else consecutive_no_new + 1
                             if len(web_candidate_urls) >= effective_max:
                                 break
-                        consecutive_no_new = 0 if added_this_query else consecutive_no_new + 1
-                        if len(web_candidate_urls) >= effective_max:
-                            break
-                        if consecutive_no_new >= no_new_streak_limit:
-                            status_box.info(
-                                f"{state_name}{target_note}: stopping early — the last "
-                                f"{no_new_streak_limit} queries found no new companies."
-                            )
-                            break
+                            if consecutive_no_new >= no_new_streak_limit:
+                                status_box.info(
+                                    f"{unit_label}: stopping early — the last "
+                                    f"{no_new_streak_limit} queries found no new companies."
+                                )
+                                break
 
-                    # --- Fold in OSM results now that the background fetch is done
-                    # (usually already finished well before the web-search loop
-                    # above completes). Processed here, in the main thread, so
-                    # this precedence — OSM wins a domain tie over web search,
-                    # matching the original OSM-first behavior — is applied
-                    # without any concurrent-write risk. ---
-                    osm_thread.join()
-                    for biz in osm_holder["results"]:
-                        if biz["website"]:
-                            dom = scrape._domain(biz["website"])
-                            if dom and dom not in candidate_urls:
-                                candidate_urls[dom] = {
-                                    "url": biz["website"], "name": biz["name"],
-                                    "query": "OpenStreetMap", "phone": biz["phone"],
-                                }
-                        elif biz["phone"] or biz["name"]:
-                            phone = biz["phone"]
-                            location_match = area_codes.phone_matches_state(phone, state_abbr) if phone else None
-                            score, label = extract.score_lead(
-                                name_source="osm", company_name=biz["name"],
-                                email="", email_source="", email_domain_match=False,
-                                phone=phone, phone_source="osm" if phone else "",
-                                phone_suspicious=extract.is_suspicious_phone(phone) if phone else True,
-                                location_match=location_match,
-                            )
-                            osm_only_rows.append({
-                                "company_name": biz["name"], "name_source": "osm",
-                                "website": "", "domain": f"osm:{biz['name'].lower().strip()}",
-                                "phone": phone, "phone_source": "osm" if phone else "",
-                                "email": "", "email_source": "", "email_domain_match": False,
-                                "all_emails_found": "", "status": "ok" if phone else "no_contact_found",
-                                "confidence_score": score, "confidence_label": label,
-                                "service": service, "target_vertical": target["label"],
-                                "state": state_name, "search_query": "OpenStreetMap",
-                            })
-                    for dom, meta in web_candidate_urls.items():
-                        if dom not in candidate_urls:
-                            candidate_urls[dom] = meta
+                        # --- Fold in OSM results now that the background fetch is done
+                        # (usually already finished well before the web-search loop
+                        # above completes). Processed here, in the main thread, so
+                        # this precedence — OSM wins a domain tie over web search,
+                        # matching the original OSM-first behavior — is applied
+                        # without any concurrent-write risk. ---
+                        osm_thread.join()
+                        for biz in osm_holder["results"]:
+                            if biz["website"]:
+                                dom = scrape._domain(biz["website"])
+                                if dom and dom not in candidate_urls:
+                                    candidate_urls[dom] = {
+                                        "url": biz["website"], "name": biz["name"],
+                                        "query": "OpenStreetMap", "phone": biz["phone"],
+                                    }
+                            elif biz["phone"] or biz["name"]:
+                                phone = biz["phone"]
+                                location_match = area_codes.phone_matches_state(phone, state_abbr) if phone else None
+                                score, label = extract.score_lead(
+                                    name_source="osm", company_name=biz["name"],
+                                    email="", email_source="", email_domain_match=False,
+                                    phone=phone, phone_source="osm" if phone else "",
+                                    phone_suspicious=extract.is_suspicious_phone(phone) if phone else True,
+                                    location_match=location_match,
+                                )
+                                osm_only_rows.append({
+                                    "company_name": biz["name"], "name_source": "osm",
+                                    "website": "", "domain": f"osm:{biz['name'].lower().strip()}",
+                                    "phone": phone, "phone_source": "osm" if phone else "",
+                                    "email": "", "email_source": "", "email_domain_match": False,
+                                    "all_emails_found": "", "status": "ok" if phone else "no_contact_found",
+                                    "confidence_score": score, "confidence_label": label,
+                                    "service": service, "target_vertical": target["label"],
+                                    "state": state_name, "search_query": "OpenStreetMap",
+                                })
+                        for dom, meta in web_candidate_urls.items():
+                            if dom not in candidate_urls:
+                                candidate_urls[dom] = meta
 
-                    skip_note = f" (filtered out {skipped_count} directory/listicle results)" if skipped_count else ""
-                    osm_note = f", {len(osm_only_rows)} from OpenStreetMap with no website" if osm_only_rows else ""
-                    status_box.info(f"Found {len(candidate_urls)} unique company sites for {state_name}{target_note}{skip_note}{osm_note}. Extracting contact info...")
+                        skip_note = f" (filtered out {skipped_count} directory/listicle results)" if skipped_count else ""
+                        osm_note = f", {len(osm_only_rows)} from OpenStreetMap with no website" if osm_only_rows else ""
+                        status_box.info(f"Found {len(candidate_urls)} unique company sites for {unit_label}{skip_note}{osm_note}. Extracting contact info...")
 
-                    scrape_inputs = [
-                        {"url": v["url"], "name": v["name"], "phone": v.get("phone", ""),
-                         "state_abbr": state_abbr, "query": v["query"]}
-                        for v in candidate_urls.values()
-                    ]
-                    scrape_progress = st.progress(0.0)
+                        scrape_inputs = [
+                            {"url": v["url"], "name": v["name"], "phone": v.get("phone", ""),
+                             "state_abbr": state_abbr, "query": v["query"]}
+                            for v in candidate_urls.values()
+                        ]
+                        scrape_progress = st.progress(0.0)
 
-                    def _cb(done, total, _state=state_name, _target=target["label"]):
-                        scrape_progress.progress(done / total if total else 1.0, text=f"{_state} — {_target}: {done}/{total} sites scraped")
+                        def _cb(done, total, _unit_label=unit_label):
+                            scrape_progress.progress(done / total if total else 1.0, text=f"{_unit_label}: {done}/{total} sites scraped")
+                            _touch_elapsed()
 
-                    scraped = scrape.scrape_many(scrape_inputs, max_workers=concurrency, progress_cb=_cb)
+                        scraped = scrape.scrape_many(scrape_inputs, max_workers=concurrency, progress_cb=_cb)
 
-                    # scrape_many preserves input order, so zip against
-                    # scrape_inputs (which carries the query) — not against
-                    # candidate_urls.items(), which drifted out of alignment
-                    # with completion-ordered results.
-                    target_rows = []
-                    for row, inp in zip(scraped, scrape_inputs):
-                        row["service"] = service
-                        row["target_vertical"] = target["label"]
-                        row["state"] = state_name
-                        row["search_query"] = inp["query"]
-                        target_rows.append(row)
-                    target_rows.extend(osm_only_rows)
+                        # scrape_many preserves input order, so zip against
+                        # scrape_inputs (which carries the query) — not against
+                        # candidate_urls.items(), which drifted out of alignment
+                        # with completion-ordered results.
+                        target_rows = []
+                        for row, inp in zip(scraped, scrape_inputs):
+                            row["service"] = service
+                            row["target_vertical"] = target["label"]
+                            row["state"] = state_name
+                            row["search_query"] = inp["query"]
+                            target_rows.append(row)
+                        target_rows.extend(osm_only_rows)
 
-                    # --- Final junk pass: runs after every other filter, on
-                    # the finished rows, using this target's own keywords.
-                    # Skipped entirely when the user turns the toggle off. ---
-                    if run_junk_filter:
-                        kept, dropped = junk_filter.partition(target_rows, target["keywords"])
-                        if dropped:
-                            junk_dropped_total += len(dropped)
-                            junk_examples.extend(
-                                f"{r.get('company_name', '?')} ({r.get('domain', '?')}) — {reason}"
-                                for r, reason in dropped[:5]
-                            )
-                        all_new_rows.extend(kept)
-                    else:
-                        all_new_rows.extend(target_rows)
+                        # --- Final junk pass: runs after every other filter, on
+                        # the finished rows, using this target's own keywords.
+                        # Skipped entirely when the user turns the toggle off. ---
+                        if run_junk_filter:
+                            kept, dropped = junk_filter.partition(target_rows, target["keywords"])
+                            if dropped:
+                                junk_dropped_total += len(dropped)
+                                junk_examples.extend(
+                                    f"{r.get('company_name', '?')} ({r.get('domain', '?')}) — {reason}"
+                                    for r, reason in dropped[:5]
+                                )
+                            all_new_rows.extend(kept)
+                        else:
+                            kept = target_rows
+                            all_new_rows.extend(target_rows)
 
-                    status_box.empty()
-                    scrape_progress.empty()
+                        status_box.empty()
+                        scrape_progress.empty()
 
-                outer_progress.progress((state_idx + 1) / total_states)
+                        completed_units += 1
+                        unit_progress.progress(completed_units / total_units)
+                        _touch_elapsed()
+                        st.write(f"✅ **{unit_label}**: kept {len(kept)} lead(s) "
+                                 f"({completed_units}/{total_units} done)")
 
-            outer_progress.empty()
+                search_status.update(
+                    label=f"✅ Search complete — {_format_elapsed(time.time() - run_start_time)} total",
+                    state="complete", expanded=False,
+                )
 
             if search_error_count:
                 sample = " · ".join(search_error_samples)

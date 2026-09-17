@@ -62,7 +62,7 @@ through manually. This file is the contract that makes that possible.
   fallback).
 - Run: `streamlit run app.py` → `http://localhost:8501`.
 - Entry point: [`app.py`](app.py) — all UI, 5 tabs (Find Leads, Lead
-  Database, Email Template, Send Emails, Send Texts). ~1,560 lines.
+  Database, Email Template, Send Emails, Send Texts). ~1,700 lines.
 - Logic package: [`lead_finder/`](lead_finder/).
 - All persistent state is flat files in [`data/`](data/) (see §12).
 - Theme: `.streamlit/config.toml` (dark theme + `server.headless`).
@@ -1127,6 +1127,54 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-18 (detailed Find Leads progress UI)** — User request: the old
+  progress feedback (one bar advancing once per STATE, a text line per
+  query) could sit visually frozen for a long time on a multi-vertical run
+  — indistinguishable from actually being stuck. Replaced with the whole
+  search+scrape loop wrapped in one `st.status(..., expanded=True)`
+  container (`app.py`, `run_clicked` block):
+  - Overall progress now advances once per **(state, business type) unit**
+    (`total_units = total_states * len(targets)`), not once per state —
+    the actual bug behind "looks frozen" on an 8-vertical run.
+  - A running elapsed-time readout (`_format_elapsed`, new helper),
+    refreshed on every single query and every scrape completion — this
+    IS the "still moving" signal, so it's deliberately not throttled.
+  - The status label itself shows "Searching {state} — {vertical}
+    (N/total)"; the body keeps a query-level sub-count ("query 4/17") and,
+    after each unit finishes, a permanent log line ("✅ Alabama — Floral
+    Businesses: kept 12 lead(s)") that stays visible in the scrollback for
+    the rest of the run — so past progress is inspectable, not just
+    current status. Collapses to one line with a checkmark
+    ("✅ Search complete — 3m 12s total") when done.
+  - **Real gotcha hit and fixed while building this, worth knowing before
+    touching this code again**: `StatusContainer.update()`'s `expanded`
+    parameter defaults to `None` ("don't change it" per the docstring),
+    but omitting it actually **clears** that field on the delta protobuf
+    message rather than leaving it alone — confirmed by reading the
+    pinned Streamlit 1.38.0's own `mutable_status_container.py` — and the
+    frontend renders a cleared bool field as `False`. Net effect: calling
+    `.update(label=...)` without also passing `expanded=True` **silently
+    re-collapses the box** on every update, which is exactly what
+    happened here (one `.update()` call per state×target unit, i.e.
+    constantly) until caught by an actual browser screenshot showing the
+    box stuck collapsed with no visible content for 30+ seconds on a live
+    run — reading the code alone would not have caught this. Fix: pass
+    `expanded=True` explicitly on every `.update()` call that should stay
+    open, not just the initial `st.status(...)` call.
+  - Verified against a live app instance end-to-end: a real small search
+    (Delaware, Manufacturing, OSM/city-queries/extra-phrasings off for
+    speed) confirmed the box stays expanded and the elapsed time and
+    query counter tick correctly throughout, then correctly collapses to
+    "✅ Search complete — 39s total" with real results, an archived
+    snapshot, and the usual summary metrics below it.
+  - Also fixed a false alarm from this same investigation: initially
+    misread a *different* Python environment's Streamlit (1.44.1, not the
+    pinned/actually-running 1.38.0) while debugging, which looked like a
+    dependency-pin drift worth "fixing" — reverted that edit once the
+    correct environment (`/home/ubuntu/miniconda3/envs/lead_finder/bin/python3`)
+    confirmed `requirements.txt`/`environment.yml`'s `streamlit==1.38.0`
+    pin was already accurate. Always check the project's actual conda env
+    (not bare `python3`) when inspecting installed package versions here.
 - **2026-09-18 (HubSpot removed entirely)** — User request: `hubspot_crm.py`
   deleted, its `app.py` UI section (Lead Database tab "HubSpot CRM" block,
   the `hubspot_crm` import, `hubspot_push_state` session-state init) and
