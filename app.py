@@ -117,6 +117,46 @@ def _run_text_batch_in_background(texting_config, jobs, delay_seconds, state):
     state["complete"] = True
 
 
+def _run_bulk_batch_in_background(smtp_config, texting_config, email_jobs, text_jobs,
+                                   email_delay, text_delay, state):
+    """
+    Bulk Send's background worker: runs the email batch, then the text
+    batch, in sequence — not interleaved row-by-row in real time, but the
+    net effect is the same as "row by row, email if it has one, text if
+    it doesn't, both if it has both" — every row that qualifies for a
+    channel gets that channel, exactly once, using the exact same
+    send_batch/send_text_batch primitives (and the exact same sent-log
+    recording) as the standalone Send Emails/Send Texts tabs. Doing it as
+    two sequential passes (instead of a genuinely interleaved single
+    pass) means this reuses those two already-tested functions completely
+    unmodified, rather than a third, riskier combined-send implementation.
+    """
+    email_results = []
+    if email_jobs:
+        def email_cb(done, total, result):
+            status = "sent" if result["success"] else "failed"
+            mailer.record_sent(result["domain"], result["to"], result["company_name"],
+                                result["service"], result["subject"], status, result.get("error", ""))
+            state["email_done"] = done
+            state["email_total"] = total
+        email_results = mailer.send_batch(smtp_config, email_jobs, delay_seconds=email_delay, progress_cb=email_cb)
+        _write_daily_sent_records_csv(email_results)
+
+    text_results = []
+    if text_jobs:
+        def text_cb(done, total, result):
+            status = "sent" if result["success"] else "failed"
+            texter.record_sent_text(result["to"], result["company_name"], result["service"],
+                                     status, result.get("error", ""), variant=result.get("variant", ""))
+            state["text_done"] = done
+            state["text_total"] = total
+        text_results = texter.send_text_batch(texting_config, text_jobs, delay_seconds=text_delay, progress_cb=text_cb)
+
+    state["email_results"] = email_results
+    state["text_results"] = text_results
+    state["complete"] = True
+
+
 def _run_browser_retry_in_background(leads, state):
     def progress_cb(done, total, result):
         state["done"] = done
@@ -207,6 +247,8 @@ if "email_send_state" not in st.session_state:
     st.session_state.email_send_state = None
 if "text_send_state" not in st.session_state:
     st.session_state.text_send_state = None
+if "bulk_send_state" not in st.session_state:
+    st.session_state.bulk_send_state = None
 if "browser_retry_state" not in st.session_state:
     st.session_state.browser_retry_state = None
 
@@ -392,8 +434,8 @@ if clear_clicked:
     st.session_state.last_run_stats = None
     st.rerun()
 
-tab_find, tab_db, tab_template, tab_send, tab_text = st.tabs(
-    ["Find Leads", "Lead Database", "Email Template", "Send Emails", "Send Texts"]
+tab_find, tab_db, tab_template, tab_send, tab_text, tab_bulk = st.tabs(
+    ["Find Leads", "Lead Database", "Email Template", "Send Emails", "Send Texts", "Bulk Send"]
 )
 
 # ============================================================== FIND LEADS ==
@@ -464,14 +506,40 @@ with tab_find:
                             service, est_state, search_target=t["search_target"],
                             cities=est_cities, city_term_limit=t.get("city_term_limit"),
                         ))
-                est_min = est_queries * float(os.getenv("SEARCH_QUERY_DELAY", "2.5")) / 60
                 if est_queries > 300:
+                    # A realistic estimate, not just a floor. The old
+                    # version only counted SEARCH_QUERY_DELAY between
+                    # queries and said so explicitly ("before counting
+                    # request time, scraping...") — technically honest,
+                    # but it badly undersold real runtime, since those
+                    # excluded costs are usually BIGGER than the delay
+                    # itself: (1) each query is a real network round-trip
+                    # on top of the artificial delay, not just the delay,
+                    # and (2) scraping every candidate site found is a
+                    # second, separate phase (per state x business type,
+                    # after all of its queries) that this never accounted
+                    # for at all. Both are folded in now. Still an
+                    # estimate — engines timing out/rate-limiting, or a
+                    # state/vertical finding far more than
+                    # TYPICAL_CANDIDATES_PER_UNIT, can push real time well
+                    # past this — but it's meant to track actual runtime,
+                    # not just a lower bound you already know you'll blow past.
+                    AVG_QUERY_REQUEST_SECONDS = 3.0    # observed avg round-trip beyond the delay, successful case
+                    AVG_SCRAPE_SECONDS_PER_SITE = 3.0  # observed avg site fetch + parse time
+                    TYPICAL_CANDIDATES_PER_UNIT = 150  # observed real-run yield, not the theoretical cap
+                    search_query_delay = float(os.getenv("SEARCH_QUERY_DELAY", "2.5"))
+                    search_minutes = est_queries * (search_query_delay + AVG_QUERY_REQUEST_SECONDS) / 60
+                    total_units_est = len(state_names) * max(len(targets), 1)
+                    candidates_per_unit = min(effective_max, TYPICAL_CANDIDATES_PER_UNIT)
+                    scrape_minutes = total_units_est * (candidates_per_unit / concurrency) * AVG_SCRAPE_SECONDS_PER_SITE / 60
+                    est_total_min = search_minutes + scrape_minutes
                     st.warning(
-                        f"⏱️ This run will issue an estimated **{est_queries:,} search queries** "
-                        f"across {len(state_names)} state(s) — at least **~{est_min:.0f} min** just "
-                        f"from the pause between queries, before counting request time, scraping, or "
-                        f"any timeouts/retries (which can add hours if the search engines are "
-                        f"struggling). To cut this down: fewer states/business types, "
+                        f"This run will issue an estimated **{est_queries:,} search queries** "
+                        f"across {len(state_names)} state(s) — roughly **~{est_total_min:.0f} min** "
+                        f"total (~{search_minutes:.0f} min searching + ~{scrape_minutes:.0f} min "
+                        f"scraping whatever's found). Still a middle estimate, not a worst case — "
+                        f"search engines timing out/rate-limiting, or an unusually high yield, can "
+                        f"push it well past this. To cut this down: fewer states/business types, "
                         f"lower **\"Phrasings expanded per city\"**, or turn off city-level queries "
                         f"or metro neighborhoods.",
                         icon="⏱️",
@@ -1760,3 +1828,299 @@ with tab_text:
                         data=text_log.to_csv(index=False).encode("utf-8"),
                         file_name="sent_text_log.csv", mime="text/csv",
                     )
+
+# ============================================================== BULK SEND ==
+with tab_bulk:
+    smtp_config = mailer.get_smtp_config()
+    texting_config = texter.get_active_texting_config()
+
+    if not smtp_config and not texting_config:
+        st.info(
+            "Neither email nor texting is configured yet — set up SMTP in the Send Emails tab "
+            "and/or 8x8 in the Send Texts tab first.",
+            icon="📨",
+        )
+    else:
+        st.caption(
+            "Row by row, for whichever leads you point this at: **email if the company has a "
+            "sendable email, text if it doesn't, both if it has both.** Draws from the same "
+            "saved-run/uploaded-file picker as Send Emails and Send Texts."
+            + ("" if smtp_config else " Email is off (SMTP not configured) — this will only text.")
+            + ("" if texting_config else " Texting is off (8x8 not configured) — this will only email.")
+        )
+
+        history_snapshots_b = storage.list_export_snapshots()
+        with st.expander("📂 Send from a saved run or an uploaded file instead of the current database", expanded=False):
+            if not history_snapshots_b:
+                st.caption("No archived runs yet — every completed search auto-saves one here, "
+                           "named `date_businesstypes_states.xlsx`.")
+                selected_snapshots_b = []
+            else:
+                selected_snapshots_b = st.multiselect(
+                    "Saved run(s) to send from",
+                    [s["filename"] for s in history_snapshots_b],
+                    help="Pick one or more. Their leads are combined (deduped by domain) and used "
+                         "below instead of the current Lead Database tab view.",
+                    key="bulk_snapshot_picker",
+                )
+            uploaded_files_b = st.file_uploader(
+                "Or upload Excel/CSV file(s) from your computer",
+                type=["xlsx", "csv"], accept_multiple_files=True,
+                help="Any of this app's own exports — a data/exports/ download, or the Lead Database "
+                     "tab's CSV/Excel export — edited or not, from anywhere on your machine. Combined "
+                     "with any saved run(s) picked above, deduped by domain. A file with no "
+                     "service/confidence_label columns (not one of this app's own exports) will pass "
+                     "through with 0 eligible leads below — the safety filters still apply.",
+                key="bulk_file_uploader",
+            )
+
+        source_frames_b = []
+        source_labels_b = []
+        upload_errors_b = []
+        if selected_snapshots_b:
+            source_frames_b.append(storage.load_export_snapshots(selected_snapshots_b))
+            source_labels_b.append(f"{len(selected_snapshots_b)} saved run(s): {', '.join(selected_snapshots_b)}")
+        if uploaded_files_b:
+            uploaded_df_b, upload_errors_b = storage.load_uploaded_snapshots(uploaded_files_b)
+            source_frames_b.append(uploaded_df_b)
+            source_labels_b.append(f"{len(uploaded_files_b)} uploaded file(s): "
+                                    f"{', '.join(f.name for f in uploaded_files_b)}")
+        if upload_errors_b:
+            st.warning("Couldn't read: " + "; ".join(upload_errors_b))
+
+        using_custom_source_b = bool(source_frames_b)
+        if using_custom_source_b:
+            df_b = (storage.dedupe_keep_last(pd.concat(source_frames_b, ignore_index=True))
+                    if len(source_frames_b) > 1 else source_frames_b[0])
+        else:
+            df_b = st.session_state.results_df
+
+        if df_b.empty:
+            st.info("No leads to send from. Run a search from **Find Leads**, or pick/upload a saved run above.")
+        else:
+            if using_custom_source_b:
+                base_df_b = df_b
+            else:
+                base_df_b = st.session_state.lead_db_view if st.session_state.lead_db_view is not None else df_b
+
+            # Same two hard, non-adjustable safety filters as Send Emails/
+            # Send Texts — see those tabs' own comments for why.
+            active_service_b = service or "Bookkeeping"
+            pre_filter_count_b = len(base_df_b)
+            base_df_b = base_df_b[base_df_b["service"] == active_service_b]
+            base_df_b = base_df_b[base_df_b["confidence_label"] == "High"]
+            excluded_by_safety_b = pre_filter_count_b - len(base_df_b)
+
+            source_desc_b = (" + ".join(source_labels_b) if using_custom_source_b else
+                              f"the **Lead Database** tab's current filter ({st.session_state.lead_db_view_desc})")
+            st.info(f"Working from {source_desc_b} "
+                    f"— then restricted to **{active_service_b}** service and **High confidence only** "
+                    f"(fixed safety rules, not adjustable here) — {len(base_df_b)} leads remain"
+                    + (f", {excluded_by_safety_b} excluded by those two rules" if excluded_by_safety_b else "") + ".",
+                    icon="🔗")
+
+            bcol1, bcol2 = st.columns(2)
+            with bcol1:
+                skip_emailed_b = st.checkbox("Skip leads already emailed", value=True,
+                                              disabled=not smtp_config, key="bulk_skip_emailed")
+            with bcol2:
+                skip_texted_b = st.checkbox("Skip leads already texted", value=True,
+                                             disabled=not texting_config, key="bulk_skip_texted")
+
+            # --- Classify each row independently per channel — this is
+            # the whole feature: NOT "email, falling back to text only if
+            # no email", but "send every channel this row actually
+            # qualifies for". A row with both ends up in both pools. Each
+            # pool's rules are copied from that channel's own standalone
+            # tab exactly (targetable-email screening, suppression,
+            # already-sent dedup for email; non-empty phone, suppression,
+            # already-texted dedup for text — texting here deliberately
+            # does NOT restrict to "no email only" the way the standalone
+            # Send Texts tab defaults to, since having an email is no
+            # longer a reason to skip texting in this combined flow). ---
+            work = base_df_b.copy()
+
+            if smtp_config:
+                has_email = work["email"].astype(str).str.strip().str.len() > 0
+                targetable = work["email"].apply(lambda e: blocklist.is_targetable_email(e) if e else False)
+                email_suppressed = pd.Series(
+                    [mailer.is_suppressed(row["email"], row["domain"]) if row["email"] else False
+                     for _, row in work.iterrows()],
+                    index=work.index, dtype=bool,
+                )
+                email_ok = has_email & targetable & ~email_suppressed
+                if skip_emailed_b:
+                    sent_domains_b = mailer.already_sent_domains()
+                    email_ok = email_ok & ~work["domain"].isin(sent_domains_b)
+            else:
+                email_ok = pd.Series(False, index=work.index)
+
+            if texting_config:
+                has_phone = work["phone"].astype(str).str.strip().str.len() > 0
+                phone_suppressed = pd.Series(
+                    [mailer.is_suppressed(phone=row["phone"]) if row["phone"] else False
+                     for _, row in work.iterrows()],
+                    index=work.index, dtype=bool,
+                )
+                text_ok = has_phone & ~phone_suppressed
+                if skip_texted_b:
+                    texted_numbers_b = texter.already_texted_numbers()
+                    already_texted = work["phone"].apply(
+                        lambda p: texter.to_e164(p) in texted_numbers_b if p else False
+                    )
+                    text_ok = text_ok & ~already_texted
+            else:
+                text_ok = pd.Series(False, index=work.index)
+
+            email_only_count = int((email_ok & ~text_ok).sum())
+            text_only_count = int((text_ok & ~email_ok).sum())
+            both_count = int((email_ok & text_ok).sum())
+            neither_count = int((~email_ok & ~text_ok).sum())
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Email only", email_only_count)
+            m2.metric("Text only", text_only_count)
+            m3.metric("Both", both_count)
+            m4.metric("Excluded (neither)", neither_count,
+                      help="No sendable email AND no usable phone, already contacted on every "
+                           "available channel, or suppressed.")
+
+            # SMS variant — same picker as Send Texts, read-only preview
+            # here (edit it from the Send Texts tab; this just selects
+            # which saved variant this batch's texts use).
+            active_bulk_sms_variant = email_template.DEFAULT_SMS_VARIANT
+            if texting_config and text_only_count + both_count > 0:
+                bulk_sms_variants = email_template.get_sms_variants(active_service_b)
+                bulk_variant_names = list(bulk_sms_variants.keys())
+                bulk_variant_key = f"bulk_sms_variant_choice__{active_service_b}"
+                if bulk_variant_key not in st.session_state or st.session_state[bulk_variant_key] not in bulk_variant_names:
+                    st.session_state[bulk_variant_key] = bulk_variant_names[0]
+                active_bulk_sms_variant = st.selectbox(
+                    "Message variant to use for the text side of this batch", bulk_variant_names,
+                    key=bulk_variant_key,
+                    help="Same variants as the Send Texts tab (edit them there). Applies to every "
+                         "text this batch sends.",
+                )
+
+            combined = (email_ok | text_ok)
+            preview_pool = work[combined]
+            if not preview_pool.empty:
+                preview_rows_b = []
+                for _, row in preview_pool.head(10).iterrows():
+                    gets_email = bool(email_ok.get(row.name, False))
+                    gets_text = bool(text_ok.get(row.name, False))
+                    channels = " + ".join(filter(None, ["Email" if gets_email else "", "Text" if gets_text else ""]))
+                    subj = ""
+                    if gets_email:
+                        subj, _ = email_template.render_for_lead(row.to_dict())
+                    preview_rows_b.append({
+                        "Company": row["company_name"], "State": row["state"],
+                        "Target Type": row.get("target_vertical", ""), "Channels": channels,
+                        "Email": row["email"] if gets_email else "", "Phone": row["phone"] if gets_text else "",
+                        "Email subject": subj,
+                    })
+                st.dataframe(pd.DataFrame(preview_rows_b), use_container_width=True, hide_index=True)
+                if len(preview_pool) > 10:
+                    st.caption(f"...and {len(preview_pool) - 10} more.")
+
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                bulk_email_delay = st.number_input("Delay between emails (seconds)", min_value=1.0, max_value=30.0,
+                                                     value=4.0, step=1.0, key="bulk_email_delay",
+                                                     disabled=email_only_count + both_count == 0)
+            with dcol2:
+                bulk_text_delay = st.number_input("Delay between texts (seconds)", min_value=1.0, max_value=30.0,
+                                                    value=3.0, step=1.0, key="bulk_text_delay",
+                                                    disabled=text_only_count + both_count == 0)
+
+            total_to_send = email_only_count + text_only_count + both_count
+            if total_to_send:
+                confirm_bulk = st.checkbox(
+                    f"I understand this will send {email_only_count + both_count} email(s) and "
+                    f"{text_only_count + both_count} text(s), to {total_to_send} real compan"
+                    f"{'y' if total_to_send == 1 else 'ies'}."
+                )
+
+                bulk_send_state = st.session_state.get("bulk_send_state")
+                bulk_is_running = bulk_send_state is not None and not bulk_send_state.get("complete", False)
+
+                if st.button("🚀 Send bulk batch", type="primary",
+                             disabled=not confirm_bulk or bulk_is_running, key="send_bulk_btn"):
+                    inline_images_b = mailer.get_signature_inline_images()
+                    email_jobs_b = []
+                    text_jobs_b = []
+                    for _, row in work[combined].iterrows():
+                        lead_dict = row.to_dict()
+                        if bool(email_ok.get(row.name, False)):
+                            subj, body = email_template.render_for_lead(lead_dict)
+                            html_body = email_template.render_html_for_lead(lead_dict)
+                            email_jobs_b.append({
+                                "to": row["email"], "subject": subj, "body": body,
+                                "html_body": html_body, "inline_images": inline_images_b,
+                                "domain": row["domain"], "company_name": row["company_name"],
+                                "service": row["service"],
+                            })
+                        if bool(text_ok.get(row.name, False)):
+                            sms_body = email_template.render_sms_for_lead(lead_dict, active_bulk_sms_variant)
+                            e164_b = texter.to_e164(row["phone"])
+                            if e164_b:
+                                text_jobs_b.append({
+                                    "to": e164_b, "body": sms_body,
+                                    "company_name": row["company_name"], "service": row["service"],
+                                    "variant": active_bulk_sms_variant,
+                                })
+
+                    new_bulk_state = {
+                        "email_done": 0, "email_total": len(email_jobs_b),
+                        "text_done": 0, "text_total": len(text_jobs_b),
+                        "email_results": [], "text_results": [], "complete": False,
+                    }
+                    st.session_state.bulk_send_state = new_bulk_state
+                    threading.Thread(
+                        target=_run_bulk_batch_in_background,
+                        args=(smtp_config, texting_config, email_jobs_b, text_jobs_b,
+                              bulk_email_delay, bulk_text_delay, new_bulk_state),
+                        daemon=True,
+                    ).start()
+                    st.rerun()
+
+            bulk_send_state = st.session_state.get("bulk_send_state")
+            if bulk_send_state is not None:
+                e_done, e_total = bulk_send_state["email_done"], bulk_send_state["email_total"]
+                t_done, t_total = bulk_send_state["text_done"], bulk_send_state["text_total"]
+                if e_total:
+                    st.progress(e_done / e_total, text=f"Emails: {e_done}/{e_total}")
+                if t_total:
+                    st.progress(t_done / t_total, text=f"Texts: {t_done}/{t_total}")
+                if bulk_send_state["complete"]:
+                    e_results = bulk_send_state["email_results"]
+                    t_results = bulk_send_state["text_results"]
+                    e_ok = sum(1 for r in e_results if r["success"])
+                    t_ok = sum(1 for r in t_results if r["success"])
+                    e_fail = len(e_results) - e_ok
+                    t_fail = len(t_results) - t_ok
+                    if e_fail == 0 and t_fail == 0:
+                        st.success(f"Done. Sent {e_ok} email(s) and {t_ok} text(s).")
+                    else:
+                        st.warning(f"Done. Emails: {e_ok} sent, {e_fail} failed. "
+                                   f"Texts: {t_ok} sent, {t_fail} failed.")
+                        if e_fail:
+                            st.caption("Failed emails:")
+                            st.dataframe(pd.DataFrame([
+                                {"company": r["company_name"], "email": r["to"], "error": r["error"]}
+                                for r in e_results if not r["success"]
+                            ]), use_container_width=True, hide_index=True)
+                        if t_fail:
+                            st.caption("Failed texts:")
+                            st.dataframe(pd.DataFrame([
+                                {"company": r["company_name"], "phone": r["to"], "error": r["error"]}
+                                for r in t_results if not r["success"]
+                            ]), use_container_width=True, hide_index=True)
+                    if st.button("Clear this status", key="clear_bulk_send_state"):
+                        st.session_state.bulk_send_state = None
+                        st.rerun()
+                else:
+                    st.info("Sending in progress — this keeps running in the background even if you "
+                            "switch tabs. Click below to check on it.", icon="⏳")
+                    if st.button("🔄 Refresh progress", key="refresh_bulk_progress"):
+                        st.rerun()

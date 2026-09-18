@@ -28,7 +28,7 @@ re-deriving all of this from the source each time.
 **What it is:** a Streamlit dashboard that finds prospective B2B clients by
 service + US state, scrapes their publicly listed contact info, scores how
 trustworthy that info is, drafts tailored outreach per lead, and can send
-it by email (SMTP) or SMS (8x8).
+it by email (SMTP), SMS (8x8), or both together per lead (Bulk Send, §14).
 
 **Direction:** currently a single-user local tool; being turned into a
 product, and ultimately into an **agent-driven** system where searching,
@@ -61,8 +61,8 @@ through manually. This file is the contract that makes that possible.
   Deps: `environment.yml` (conda, canonical) / `requirements.txt` (pip
   fallback).
 - Run: `streamlit run app.py` → `http://localhost:8501`.
-- Entry point: [`app.py`](app.py) — all UI, 5 tabs (Find Leads, Lead
-  Database, Email Template, Send Emails, Send Texts). ~1,700 lines.
+- Entry point: [`app.py`](app.py) — all UI, 6 tabs (Find Leads, Lead
+  Database, Email Template, Send Emails, Send Texts, Bulk Send). ~2,125 lines.
 - Logic package: [`lead_finder/`](lead_finder/).
 - All persistent state is flat files in [`data/`](data/) (see §12).
 - Theme: `.streamlit/config.toml` (dark theme + `server.headless`).
@@ -315,10 +315,26 @@ state level.
 
 `app.py` also computes a **pre-run estimated query count** (pure string
 building via `search.build_queries`, no network calls — cheap to run
-upfront) summed across every state × target, and shows a `st.warning` with
-the estimate and a floor time (`est_queries × SEARCH_QUERY_DELAY`) whenever
-it exceeds 300 — so a combinatorial blowup is visible **before** committing
-to a run, not discovered after it finishes.
+upfront) summed across every state × target, and shows a `st.warning`
+whenever it exceeds 300 — so a combinatorial blowup is visible **before**
+committing to a run, not discovered after it finishes. The time figure
+next to it is a genuine estimate of real runtime (`~{total} min` =
+`~{search_minutes} min searching + ~{scrape_minutes} min scraping`), not
+just `est_queries × SEARCH_QUERY_DELAY` — **fixed 2026-09-18** after that
+floor-only number turned out to badly undersell actual runtime (it also
+had a real display bug: the literal `⏱️` in the warning text plus
+`st.warning(..., icon="⏱️")` rendered the icon **twice**; the text-embedded
+one was removed). `search_minutes` now adds a per-query request-time
+constant (`AVG_QUERY_REQUEST_SECONDS = 3.0`, an observed average, not just
+the artificial delay) on top of `SEARCH_QUERY_DELAY`; `scrape_minutes` is
+new entirely — `total_units × (candidates_per_unit / concurrency) ×
+AVG_SCRAPE_SECONDS_PER_SITE`, where `candidates_per_unit =
+min(effective_max, TYPICAL_CANDIDATES_PER_UNIT=150)` (150 is an observed
+real-run yield ceiling, not the theoretical/uncapped max — using the
+theoretical max here would make the estimate absurd in uncapped mode).
+Both `AVG_*` constants are hardcoded in `app.py`, not `.env`-configurable
+— revisit them if real runs consistently over/undershoot this estimate by
+a lot.
 
 ### 4b. Metro neighborhoods (`include_metro_neighborhoods`)
 
@@ -1052,6 +1068,67 @@ per-vertical template to test separately — what email covers with
 per-vertical rows, SMS covers with the variant picker (§11) instead,
 which the test send also respects. Message prefixed `[TEST]`.
 
+### Bulk Send (`Bulk Send` tab, added 2026-09-18)
+
+User request: "row by row, email if the company has an email, text if it
+doesn't, both if it has both, until the document ends." The standalone
+Send Emails/Send Texts tabs can't do this on their own — Send Emails only
+ever looks at rows *with* an email, and Send Texts defaults to *excluding*
+rows that have one (`"Only leads with no email"`, on by default — it's
+built as email's fallback channel, not an equal partner). Bulk Send is a
+third tab, not a replacement for either: same source picker (§ below),
+same two hard safety filters (service match + High confidence), but
+**two independent per-row eligibility masks computed side by side**
+instead of one funnel:
+
+- `email_ok` — identical rules to Send Emails' own funnel (non-empty +
+  `blocklist.is_targetable_email` + not suppressed + not already emailed
+  if "Skip leads already emailed" is on). `False` for every row if SMTP
+  isn't configured.
+- `text_ok` — identical rules to Send Texts' own funnel **minus** the
+  "only if no email" restriction (non-empty phone + not suppressed + not
+  already texted if "Skip leads already texted" is on). Deliberately does
+  **not** additionally check `extract.is_suspicious_phone` here, matching
+  Send Texts' own existing behavior: an unparseable/suspicious number is
+  silently skipped later at job-build time via `texter.to_e164` returning
+  `None`, not filtered out of the eligibility count — kept consistent
+  with the tab this was copied from rather than introducing a stricter
+  check that would make the two tabs disagree on the same row. `False`
+  for every row if 8x8 isn't configured.
+
+A row's channels = whichever mask(s) it passes — `email_ok & ~text_ok` →
+email only, `text_ok & ~email_ok` → text only, both → both, neither →
+excluded. Shown as 4 metrics (Email only / Text only / Both / Excluded)
+plus a combined preview table with a "Channels" column. An SMS variant
+picker (same variants as §11, edited from the Send Texts tab — Bulk Send
+only *selects* one, no separate editor) applies to every text this batch
+sends.
+
+**Send mechanics**: not a genuinely interleaved single pass — clicking
+"Send bulk batch" builds two separate job lists (`email_jobs`, `text_jobs`)
+from the same eligible rows and runs them **sequentially** in the
+background (`_run_bulk_batch_in_background`): the whole email batch via
+`mailer.send_batch` first, then the whole text batch via
+`texter.send_text_batch`, each through the exact same functions (and the
+exact same sent-log recording — `mailer.record_sent`,
+`texter.record_sent_text` with `variant`) as their standalone tabs. Net
+effect for the document is identical to true row-by-row interleaving
+(every row gets every channel it qualifies for, exactly once); doing it
+as two passes over two already-thoroughly-tested primitives was judged
+safer than a third, novel interleaved sender. Progress is tracked as two
+independent counters (`email_done`/`email_total`, `text_done`/`text_total`)
+shown as two separate progress bars, since the two phases don't run at
+the same time. Each channel gets its own delay-between-sends control
+(defaults matching each standalone tab: 4.0s email, 3.0s text).
+
+Verified end-to-end against a live 466-row production database (real
+Dental Practices leads across several states): 12 email-only, 393
+text-only, 61 both, 0 excluded — `12+61=73` emails and `393+61=454` texts
+computed and displayed correctly, confirmed against the confirmation
+checkbox's own arithmetic. The actual send was **not** triggered during
+verification (466 real companies) — only computed/rendered state was
+checked.
+
 ### Browser re-scrape (`browser_scrape.py`) — automatic + manual
 
 For leads with a real website (not `osm:`) but no email/phone. Runs in two
@@ -1190,6 +1267,34 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-18 (Bulk Send tab)** — User request: a combined send that
+  goes row by row through a document and emails or texts (or both) each
+  company depending on what contact info it actually has, instead of
+  running Send Emails and Send Texts as two separately-filtered passes
+  (Send Texts' own "no email only" default would otherwise skip texting
+  any row that also has an email). New `Bulk Send` tab — see §14 for the
+  full mechanism. Reused the source picker and both channels' existing
+  eligibility rules and send primitives verbatim rather than writing a
+  new interleaved sender; the only new logic is computing the two
+  eligibility masks side by side instead of one funnel excluding the
+  other. Verified against a real 466-row database (73 emails + 454 texts
+  computed correctly across email-only/text-only/both buckets) without
+  triggering the actual send.
+- **2026-09-18 (pre-run time estimate fixed; double icon fixed)** — Two
+  bugs in the Find Leads pre-run warning, both user-reported: (1) the
+  warning showed `⏱️` twice — the icon was both hardcoded into the
+  message text AND passed as `st.warning(..., icon="⏱️")`; removed the
+  text-embedded one. (2) The time estimate itself was a bare floor
+  (`est_queries × SEARCH_QUERY_DELAY`), explicit about excluding request
+  time, scraping, and retries — technically honest but badly undersold
+  real runtime, since those excluded costs are usually bigger than the
+  delay itself. Replaced with a real estimate that adds a per-query
+  request-time constant on top of the delay, plus a new, separate
+  scrape-phase estimate (`candidates_per_unit / concurrency ×
+  AVG_SCRAPE_SECONDS_PER_SITE`, candidates capped at an observed-typical
+  150/unit rather than the theoretical/uncapped max). See the "pre-run
+  estimated query count" note earlier in §3/§5 area for the exact
+  formula and constants.
 - **2026-09-18 (Stop button + incremental saving)** — User picked this up
   from a standing suggestions list. See §3 step 7a for the full mechanism.
   Short version: a Stop button that works by letting Streamlit's own

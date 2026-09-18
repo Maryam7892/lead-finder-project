@@ -223,6 +223,9 @@ to pick up a newly created env.
   automatically next time you pick this service), or **Reset to default**
   to go back. Preview against any saved lead and export rendered versions.
 - **Send Emails tab** - see [Sending emails](#sending-emails) below.
+- **Send Texts tab** - see [Sending texts](#sending-texts) below.
+- **Bulk Send tab** - see [Bulk sending](#bulk-sending-email--text-together)
+  below.
 
 ## Email templates - Input, Process, Output
 
@@ -539,10 +542,13 @@ generally gives the widest, most accurate coverage.
 
 Every filter in the Advanced expander has a toggle - nothing here filters
 or slows a run down silently. Before any query is sent, the app also shows
-an **estimated query count** (and a floor time from it) whenever a run
-would issue more than ~300 queries, so a combinatorial blowup from
-stacking these settings is visible upfront instead of discovered after
-hours.
+an **estimated query count and a real time estimate** (covering both the
+search phase and the scraping phase that follows it, not just a floor)
+whenever a run would issue more than ~300 queries, so a combinatorial
+blowup from stacking these settings is visible upfront instead of
+discovered after hours. It's still an estimate, not a guarantee - engines
+timing out/rate-limiting or an unusually high yield can push real time
+past it.
 
 ### When searches keep timing out
 
@@ -725,9 +731,9 @@ length and a text is read at a glance, not skimmed like an email - the
 default Bookkeeping SMS template is well under 200 characters. Each lead
 still gets rendered with *its own* service's SMS template, same as email.
 
-**Before sending to real numbers:** use **Send test text to this number**
-first (enter your own number directly in the tab - there's no env var for a
-personal test destination). Same delay/confirmation pattern as email
+**Before sending to real numbers:** use **Send test text to** first -
+same known-numbers-dropdown-plus-Custom pattern as the email tab
+(`TEST_TEXT_NUMBERS` in `.env`). Same delay/confirmation pattern as email
 applies here too.
 
 **Phone numbers are converted to E.164 format** (`+15125550101`) before
@@ -735,6 +741,31 @@ sending, since that's what 8x8's API requires - this happens
 automatically for both US numbers (a bare 10-digit number gets `+1`
 prepended) and already-international numbers (a `+`-prefixed number is
 passed through as-is).
+
+## Bulk sending (email + text together)
+
+The **Bulk Send** tab exists for one specific thing the other two tabs
+can't do on their own: go through a document row by row and, for each
+company, **email it if it has a sendable email, text it if it doesn't,
+and send both if it has both** - rather than running Send Emails and
+Send Texts as two separately-filtered passes (Send Texts defaults to
+skipping any row that also has an email, since it's built as email's
+*fallback* channel there, not an equal partner).
+
+It uses the exact same "saved run or uploaded file" picker as the other
+two send tabs, and the exact same eligibility rules each channel already
+uses on its own tab (targetable email + not suppressed + not already
+emailed; non-empty phone + not suppressed + not already texted) - just
+computed side by side instead of one excluding the other. Before sending,
+it shows four counts (Email only / Text only / Both / Excluded) and a
+preview table with a **Channels** column so you can see exactly what
+every row is about to get. Pick which SMS variant to use for the text
+side (same variants as Send Texts - edit them there), confirm the exact
+counts in the checkbox, and send. Emails go out first, then texts, each
+with their own delay setting - not literally interleaved row-by-row in
+real time, but every row still ends up getting every channel it
+qualified for, recorded in the same sent-email and sent-text logs the
+standalone tabs use.
 
 ## Project structure
 

@@ -174,7 +174,7 @@ def get_target_verticals(service: str):
     return SERVICE_TARGET_VERTICALS.get(service)
 
 MAJOR_CITIES_BY_STATE = {
-"California": [
+    "California": [
     "Los Angeles", "San Diego", "San Jose", "San Francisco", "Fresno", "Sacramento", "Long Beach", "Oakland", "Bakersfield", "Anaheim", "Riverside", "Irvine", "Santa Ana", "Chula Vista", "Stockton", "Fremont", "San Bernardino", "Modesto", "Fontana", "Oxnard", "Huntington Beach", "Glendale", "Elk Grove", "Ontario", "Santa Clarita", "Oceanside", "Rancho Cucamonga", "Santa Rosa", "Garden Grove", "Corona", "Lancaster", "Palmdale", "Salinas", "Hayward", "Pomona", "Sunnyvale", "Escondido", "Torrance", "Pasadena", "Orange", "Fullerton", "Roseville",
     "Adelanto", "Agoura Hills", "Alameda", "Albany", "Alhambra", "Aliso Viejo", "Alturas", "Amador City", "American Canyon", "Anaheim", "Anderson", "Angels Camp", "Antioch", "Apple Valley", "Arcadia", "Arcata", "Arroyo Grande", "Artesia", "Arvin", "Atascadero", "Atherton", "Atwater", "Auburn", "Avalon", "Avenal", "Azusa",
     "Baldwin Park", "Banning", "Barstow", "Beaumont", "Bell", "Bell Gardens", "Bellflower", "Belmont", "Belvedere", "Benicia", "Berkeley", "Beverly Hills", "Big Bear Lake", "Biggs", "Bishop", "Blue Lake", "Blythe", "Bradbury", "Brawley", "Brea", "Brentwood", "Brisbane", "Buellton", "Buena Park", "Burbank", "Burlingame",
