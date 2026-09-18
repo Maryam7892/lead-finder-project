@@ -557,7 +557,18 @@ through phases of timing out or rate-limiting a given IP. When that
 happens you'll get **one summary warning** at the end of a run
 ("N search queries returned nothing…") instead of a wall of red boxes, and
 the run falls back on whatever OpenStreetMap and the successful queries
-returned.
+returned. If the errors all mention a **DNS error**, the warning says so
+explicitly and points at your network/DNS instead of the usual "try a
+different engine" advice - that pattern means every engine failed the
+same way at once, which is a resolver/network problem, not one engine
+rate-limiting you.
+
+If **8 queries in a row fail completely** (every engine, every retry -
+not just "found nothing new"), the app stops trying web search for the
+rest of that run entirely and tells you so immediately, rather than
+grinding through every remaining query at the full retry delay for a
+guaranteed failure. OpenStreetMap keeps working as normal either way -
+it's a separate API, unaffected by this.
 
 **Don't pin `SEARCH_ENGINE_BACKEND` to a single engine** to "fix" this -
 that was tried and made things worse: one run's errors turned out to be

@@ -142,6 +142,36 @@ verticals, otherwise the service itself):
      provably aren't finding anything new. A target that keeps finding new
      companies is never cut short by this — it only fires on genuine
      saturation.
+   - **Search-failure circuit breaker** (`SEARCH_FAILURE_CIRCUIT_BREAKER =
+     8`, hardcoded in `app.py`, added 2026-09-18) — a different signal
+     than the streak above: a query that returns a single `__ERROR__` row
+     means *every* configured engine failed *and* every `SEARCH_RETRIES`
+     retry also failed — a total loss for that query, not just an
+     unproductive one. A `consecutive_search_failures` counter (reset to
+     0 by any query that returns anything else, success or legitimately
+     empty) is tracked **across the whole run**, not per target. Once it
+     hits 8 in a row, `web_search_disabled_due_to_failures` is set and
+     stays set for the rest of the run: every subsequent state/target
+     unit skips building/issuing web-search queries entirely
+     (`queries = []`) and relies on OSM alone, which is unaffected by
+     this (OSM is a separate Overpass API call, not a `ddgs` search).
+     Exists because 8 fully-failed queries in a row is strong evidence
+     the search backend is unreachable outright (most commonly a DNS
+     resolution failure — `ddgs` hitting `search.yahoo.com`,
+     `search.brave.com`, `www.bing.com`, etc. all fail with the identical
+     "DNS error: Server Failure" pattern, which points at this machine's/
+     network's DNS resolver, not per-engine rate-limiting), in which case
+     grinding through the rest of a multi-hundred-query run — paying the
+     full retry+backoff delay on every single guaranteed-to-fail query —
+     wastes real time for zero benefit. Fires a `st.warning` the moment
+     it trips (distinct message when the sampled errors mention "DNS
+     error" — steers toward checking network/DNS rather than the usual
+     "pin to one engine" advice, which doesn't help when every engine is
+     failing identically) and again, more briefly, in the end-of-run
+     summary. Verified in isolation (not by breaking real DNS): fed the
+     exact counting logic a simulated sequence of error/success results
+     and confirmed it resets correctly on any success and trips exactly
+     on the 8th consecutive failure, not the 7th or 9th.
 3. **Scrape** the candidate pool: `scrape.scrape_many(inputs, max_workers=concurrency)`
    (thread pool, `concurrency` = "Concurrent site scrapes", 4–50, **default
    25**). Results are returned in input order. Each site →
@@ -1267,6 +1297,26 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-18 (search-failure circuit breaker + DNS-aware error message)**
+  — User hit a real run where 36 queries failed with the identical
+  pattern across 3 different engines (`search.yahoo.com`,
+  `search.brave.com`, `www.bing.com` all returning "DNS error: Server
+  Failure"), which the existing warning's advice ("pin to one reliable
+  engine") wouldn't have fixed, since the DNS resolver itself was the
+  problem, not any one engine. Two fixes, see §3 step 2's new bullet for
+  the full mechanism: (1) a `consecutive_search_failures` counter tracked
+  across the whole run (not per target) trips a circuit breaker at 8
+  consecutive total-failure queries, disabling web search for the rest
+  of the run (OSM keeps working — separate API) instead of grinding
+  through every remaining query at full retry-backoff cost for a
+  guaranteed failure; (2) both the trip-time warning and the end-of-run
+  summary detect when the sampled errors mention "DNS error" and steer
+  toward checking network/DNS instead of repeating the single-engine-pin
+  advice, which is actively unhelpful for a DNS-wide failure. Verified
+  the counting logic in isolation (couldn't reproduce real DNS failure
+  on demand): fed it a simulated success/failure sequence and confirmed
+  it resets on any success and trips on exactly the 8th consecutive
+  failure.
 - **2026-09-18 (Bulk Send tab)** — User request: a combined send that
   goes row by row through a document and emails or texts (or both) each
   company depending on what contact info it actually has, instead of

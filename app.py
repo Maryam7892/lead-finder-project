@@ -459,6 +459,22 @@ with tab_find:
             junk_examples = []
             search_error_count = 0
             search_error_samples = []
+            # Circuit breaker for a genuinely dead search backend (DNS down,
+            # network blocked, etc.) — distinct from consecutive_no_new
+            # below, which is about queries that SUCCEED but don't turn up
+            # anything new. This tracks queries where EVERY engine failed
+            # outright. A handful of those is normal transient flakiness;
+            # a long unbroken run of them means the backend isn't reachable
+            # at all, and grinding through the rest of a multi-hundred-query
+            # run at ~SEARCH_QUERY_DELAY + retry-backoff seconds PER guaranteed
+            # failure would waste a lot of real time for zero benefit — OSM
+            # keeps working fine either way, so once this trips, web search
+            # is skipped for the rest of THIS run (not just the current
+            # state/target) rather than repeating the same failure hundreds
+            # of times over.
+            SEARCH_FAILURE_CIRCUIT_BREAKER = 8
+            consecutive_search_failures = 0
+            web_search_disabled_due_to_failures = False
             total_states = len(state_names)
 
             verticals = get_target_verticals(service)
@@ -632,8 +648,10 @@ with tab_find:
                         osm_thread.start()
 
                         # --- Web search: fills gaps OSM doesn't cover. Runs while the
-                        # OSM thread above fetches in parallel. ---
-                        queries = search.build_queries(
+                        # OSM thread above fetches in parallel. Skipped entirely once
+                        # the circuit breaker below has tripped for this run — OSM
+                        # (already fetched above) still covers this unit either way. ---
+                        queries = [] if web_search_disabled_due_to_failures else search.build_queries(
                             service, state_name, search_target=target["search_target"],
                             cities=cities, city_term_limit=target.get("city_term_limit"),
                         )
@@ -645,6 +663,8 @@ with tab_find:
                             _touch_elapsed()  # every query — this IS the "still moving" signal
                             hits = search.run_search(q, backend=backend, max_results=effective_results_per_query)
                             added_this_query = 0
+                            query_totally_failed = len(hits) == 1 and "__ERROR__" in hits[0].get("snippet", "")
+                            consecutive_search_failures = consecutive_search_failures + 1 if query_totally_failed else 0
                             for h in hits:
                                 url = h.get("url", "")
                                 title = h.get("title", "")
@@ -675,6 +695,28 @@ with tab_find:
                                 status_box.info(
                                     f"{unit_label}: stopping early — the last "
                                     f"{no_new_streak_limit} queries found no new companies."
+                                )
+                                break
+                            if consecutive_search_failures >= SEARCH_FAILURE_CIRCUIT_BREAKER:
+                                web_search_disabled_due_to_failures = True
+                                looks_like_dns = any(
+                                    "dns error" in s.lower() for s in search_error_samples
+                                )
+                                st.warning(
+                                    f"🔌 The last {SEARCH_FAILURE_CIRCUIT_BREAKER} search queries in a row "
+                                    f"failed completely (every engine, every retry) — "
+                                    + ("this looks like a DNS/network problem on this machine or network "
+                                       "(every engine failing with the same DNS error at once means it's "
+                                       "not one engine rate-limiting you), not something re-running fixes. "
+                                       "Worth checking your network connection or trying a different DNS "
+                                       "server (e.g. 1.1.1.1 or 8.8.8.8) before running again. "
+                                       if looks_like_dns else
+                                       "this looks like the search backend is unreachable right now, not "
+                                       "just one engine rate-limiting. ")
+                                    + "**Skipping web search for the rest of this run** — OpenStreetMap "
+                                    "results (already unaffected) keep coming in as normal for every "
+                                    "remaining state/business type.",
+                                    icon="🔌",
                                 )
                                 break
 
@@ -796,14 +838,36 @@ with tab_find:
 
             if search_error_count:
                 sample = " · ".join(search_error_samples)
-                st.warning(
-                    f"⚠️ {search_error_count} search quer{'y' if search_error_count == 1 else 'ies'} "
-                    f"returned nothing — the free search engines were timing out or rate-limiting. "
-                    f"Results this run lean on OpenStreetMap and whatever queries did succeed. "
-                    f"Re-running later, raising `SEARCH_QUERY_DELAY`/`SEARCH_TIMEOUT` in `.env`, or "
-                    f"setting `SEARCH_ENGINE_BACKEND` to a single reliable engine usually helps.\n\n"
-                    f"First errors: {sample}"
-                )
+                looks_like_dns_summary = any("dns error" in s.lower() for s in search_error_samples)
+                if web_search_disabled_due_to_failures:
+                    # The circuit breaker already explained itself in detail,
+                    # right when it tripped mid-run (§ above) — this is just
+                    # the end-of-run recap, not a repeat of that advice.
+                    st.warning(
+                        f"⚠️ Web search was disabled partway through this run after "
+                        f"{SEARCH_FAILURE_CIRCUIT_BREAKER} queries in a row failed completely "
+                        f"({search_error_count} failed total). Results lean heavily on OpenStreetMap "
+                        f"for whatever ran after that point.\n\nFirst errors: {sample}"
+                    )
+                elif looks_like_dns_summary:
+                    st.warning(
+                        f"⚠️ {search_error_count} search quer{'y' if search_error_count == 1 else 'ies'} "
+                        f"returned nothing — every engine failed with a **DNS error**, which points to "
+                        f"a network/DNS problem on this machine or network, not per-engine "
+                        f"rate-limiting. Re-running or switching `SEARCH_ENGINE_BACKEND` likely won't "
+                        f"help on its own here — worth checking your network connection or trying a "
+                        f"different DNS server (e.g. 1.1.1.1 or 8.8.8.8) first. Results this run lean "
+                        f"on OpenStreetMap and whatever queries did succeed.\n\nFirst errors: {sample}"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ {search_error_count} search quer{'y' if search_error_count == 1 else 'ies'} "
+                        f"returned nothing — the free search engines were timing out or rate-limiting. "
+                        f"Results this run lean on OpenStreetMap and whatever queries did succeed. "
+                        f"Re-running later, raising `SEARCH_QUERY_DELAY`/`SEARCH_TIMEOUT` in `.env`, or "
+                        f"setting `SEARCH_ENGINE_BACKEND` to a single reliable engine usually helps.\n\n"
+                        f"First errors: {sample}"
+                    )
 
             scraped_count = len(all_new_rows) + junk_dropped_total
 
