@@ -561,17 +561,28 @@ Returns True (skip, don't scrape) if **any** of:
   LinkedIn, Pinterest, Reddit, Quora, Medium, TikTok, Google, Bing, Yahoo,
   Amazon, Apple, ..., archive.org (added 2026-09-24 — the Internet Archive,
   not a business of any kind).
-- `NEWS_AND_MEDIA_DOMAINS` (added 2026-09-24) — local/regional news outlets
-  and magazines found in a nationwide Event Management + Floral audit
-  (Fox 13 News Utah, Noozhawk, Rhode Island Monthly, Buckrail, ...).
-  General, not vertical-specific — kept as its own set since a news site
-  can rank for any vertical's "<city> <service> companies" query.
-- `GOVERNMENT_CHAMBER_TOURISM_DOMAINS` (added 2026-09-24) — specific
-  confirmed city/county government, chamber-of-commerce, and tourism/CVB
+- `NEWS_AND_MEDIA_DOMAINS` (added 2026-09-24, grown across 4 audit sweeps
+  the same day to 21 domains) — local/regional/national news outlets, TV
+  and radio stations, and magazines found in a nationwide Event
+  Management + Floral audit (Fox 13 News Utah, Noozhawk, Rhode Island
+  Monthly, Buckrail, Fox News, ABC7 San Francisco, ...). General, not
+  vertical-specific — kept as its own set since a news site can rank for
+  any vertical's "<city> <service> companies" query. Several are call-
+  sign-style domains (wsvn.com, wnbf.com, adn.com, denver7.com) with no
+  "news" word in the domain at all — a deliberate reminder of why bare
+  `news` stays excluded from the automatic newspaper-masthead name
+  pattern below (too generic) and why this has to stay a manually-grown
+  explicit list rather than an automatic keyword drop.
+- `GOVERNMENT_CHAMBER_TOURISM_DOMAINS` (added 2026-09-24, grown across 4
+  audit sweeps to 25 domains) — specific confirmed city/county
+  government, chamber-of-commerce, university-athletics, and tourism/CVB
   domains not already caught by the general `is_institutional_tld` /
-  `is_chamber_domain` checks above (e.g. `.org`/`.com` government-style
-  sites like masontx.org, tylertexas.com — not `.gov`, so the TLD check
-  alone wouldn't catch them). General, not vertical-specific.
+  `is_chamber_domain` / `is_tourism_domain` checks above (e.g.
+  `.org`/`.com` government-style sites like masontx.org, tylertexas.com —
+  not `.gov`; a chamber-management SaaS vendor, chamberorganizer.com,
+  whose domain doesn't end in "chamber.\<tld\>"; "Meet Minneapolis" at
+  minneapolis.org, whose domain doesn't say "meet" at all). General, not
+  vertical-specific.
 - `REFERENCE_DOMAINS` — Merriam-Webster, Dictionary.com, Wiktionary,
   Britannica, Thesaurus.com, ... (rank for "best"/"small" in query
   phrasing).
@@ -701,7 +712,15 @@ positive silently deletes a real lead. Drops a row if **any**:
    bureau / tourism board / turismo`, a name starting with `Visit /
    Discover / Explore <Placename>` (destination-marketing sites —
    `discover`/`explore` added 2026-09-24 alongside the original `visit`,
-   same naming convention, different verb), `film & tv production`,
+   same naming convention, different verb; deliberately does **not**
+   include `meet` — tried and reverted the same day after "Meet Dr. Unruh"
+   / "Meet Dr. Duke Trinh..." turned out to be ordinary staff/founder
+   bio-page titles, an extremely common convention on a real practice's
+   own site across every vertical, not a tourism signal at all. "Meet
+   \<Place\>" CVB sites like "Meet Minneapolis" are instead caught by an
+   explicit domain-blocklist entry plus the DOMAIN-level check in §6a rule
+   5a, which has a much narrower, safer false-positive surface than a
+   free-standing name pattern), `film & tv production`,
    newspaper-masthead words (`star-news/tribune/gazette/chronicle/...`),
    professional-association/academic-department names (`academy of /
    association of / society of / college of / school of / institute of ...
@@ -728,25 +747,44 @@ positive silently deletes a real lead. Drops a row if **any**:
    "dental"/"dentist") is spared via the keyword check, only a hospital
    with no dental branding at all gets dropped.
 5a. **Domain** matches `blocklist.is_tourism_domain` (`visit<place>.com` /
-   `discover<place>.com` / `explore<place>.com`, no space) — same
-   conditional gate as rule 5, and deliberately **not** in the pre-scrape
-   blocklist or the unconditional domain check in rule 1. Added
-   2026-09-24, then narrowed the same day after it caught a real false
-   positive before shipping: "World Of Smiles Pediatric Dentistry" at
-   `visitworldofsmiles.com` is a genuine, verified Portland, OR pediatric
-   dental practice using "visit" as ordinary marketing language ("come
-   visit us"), not a tourism-board naming convention. Unlike
-   `is_chamber_domain` (rule 1, unconditional — no legitimate business's
-   own domain ends in "chamber.\<tld\>"), a "visit"-prefixed domain **can**
-   legitimately be a real business's own branding, so this is gated on the
-   vertical's own keyword being absent from the name, same as rule 5:
-   "World Of Smiles..." (name says "dentistry") is spared; "Bloom 'n
-   House" at `visitbeulah.com` (an actual Sitka-style tourism-board page,
-   name has no floral keyword) is still correctly dropped. Do not move
-   this back to an unconditional check, in the pre-scrape blocklist or
-   here, without re-confirming the World Of Smiles case stays kept — same
-   "don't revert without re-confirming" bar as the 2026-09-14 mailto:-
-   consumer-domain narrowing in §8.
+   `discover<place>.com` / `explore<place>.com` / `meet<place>.com`, no
+   space) — deliberately **not** in the pre-scrape blocklist or the
+   unconditional domain check in rule 1, and gated by TWO checks, not one:
+   - If the vertical's own keyword is absent from the extracted name →
+     drop unconditionally (same shape as rule 5's conditional-term gate).
+   - If the keyword IS present, that alone isn't enough — also require
+     `blocklist.tourism_domain_place_slug(domain)` (the part after
+     visit/discover/explore/meet, e.g. "gilroy", "worldofsmiles") to
+     actually appear in the normalized business name. Only if BOTH the
+     keyword is present AND the domain's place slug relates to the
+     business's own name does the row survive.
+   Added 2026-09-24, then tightened twice the same day after two real
+   false positives, both caught by re-running the rule against real
+   production data rather than just the reported cases (see the
+   2026-09-24 change log entry for the full story):
+   1. Fully unconditional at first — wrongly dropped "World Of Smiles
+      Pediatric Dentistry" (`visitworldofsmiles.com`, a genuine Portland,
+      OR pediatric dental practice using "visit" as marketing language).
+      Fixed with the keyword-absence gate above.
+   2. The keyword-only gate then wrongly KEPT real tourism-site
+      mis-scrapes whenever the scraped name happened to share a vertical
+      keyword — e.g. "Expressions Floral" mentioned on Gilroy, CA's own
+      tourism site (`visitgilroy.com`; "Floral" is literally in that
+      business's name even though the domain is clearly not its own).
+      Fixed with the place-slug-relation check above, which strictly
+      narrows what the keyword-only gate already spared — it can only
+      catch MORE junk, never less, so it can't reintroduce case 1 ("World
+      Of Smiles"'s slug "worldofsmiles" IS contained in its own name;
+      "gilroy" has nothing to do with "Expressions Floral").
+   "Bloom 'n House" at `visitbeulah.com` (no floral keyword in the name
+   at all) is dropped by the first gate alone, same as before. Do not
+   loosen either gate without re-confirming both the World Of Smiles and
+   Expressions Floral cases stay correctly resolved — same "don't revert
+   without re-confirming" bar as the 2026-09-14 mailto:-consumer-domain
+   narrowing in §8. Note that "meet" is intentionally only in this
+   DOMAIN-level check, not the NAME-level pattern in rule 4 — see that
+   rule's note on why "Meet Dr. \<Name\>" (an ordinary bio-page title) made
+   a free-standing name pattern too risky.
 6. **Email prefix is in `_NETWORK_TEMPLATE_EMAIL_PREFIXES`** (`wecare`) —
    a shared, templated "customer care" address seen across many different
    city-named domains (`wecare@pomonasflorist.com`,
@@ -1432,85 +1470,147 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
-- **2026-09-24 (nationwide Event Management + Floral audit; general
-  government/chamber/tourism/news filtering; real precision bug caught
-  before shipping)** — User audited a combined, all-50-states Event
-  Management + Floral database (built from several search runs across
-  2026-09-16/18/19) and reported ~24 distinct junk companies plus two
-  broader patterns (national flower-delivery aggregators; generic
-  directory/media names). Investigated each and fixed:
+- **2026-09-24 (nationwide Event Management + Floral audit, 4 sweeps;
+  general government/chamber/tourism/news filtering; two real precision
+  bugs caught before shipping)** — User audited a combined, all-50-states
+  Event Management + Floral database (built from several search runs
+  across 2026-09-16/18/19) across two rounds of reports, ~50 distinct
+  junk companies total plus broader patterns (national flower-delivery
+  aggregators; generic directory/media names). Investigated every case
+  and, after each new rule, re-ran a broad automated sweep across the
+  *entire* dataset (not just the reported cases) to find anything else
+  the same category of junk had missed — this is what turned a ~24-case
+  fix into a 4-round one. Final rules:
   - New `blocklist.is_institutional_tld` (`.gov`/`.edu`, unconditional —
     see §6) and `is_chamber_domain` (`…chamber.<tld>`, unconditional),
     wired into both the pre-scrape filter and the post-scrape junk pass.
-  - New `blocklist.is_tourism_domain` (`visit`/`discover`/`explore` +
-    place-name-shaped domain, e.g. `visitbeulah.com`) — **conditional**,
-    gated on the vertical's own keyword being absent from the extracted
-    name, and deliberately **not** in the pre-scrape blocklist. This
-    started out unconditional like the other two, but caught a real false
-    positive during this same audit, before it shipped: "World Of Smiles
-    Pediatric Dentistry" at `visitworldofsmiles.com` — a genuine, verified
-    Portland, OR pediatric dental practice (confirmed via direct lookup:
-    real address, phone, founder, Yelp reviews) using "visit" as ordinary
-    marketing language, not a tourism-board naming convention. Caught by
-    actually re-running the new rule against real production data (not
-    just the reported cases) before finalizing — see §6a rule 5a for the
-    full story and why `is_chamber_domain` stayed unconditional while this
-    one didn't (a real business's own domain can plausibly start with
-    "visit"; it essentially never ends in "chamber.com").
+  - New `blocklist.is_tourism_domain` (`visit`/`discover`/`explore`/`meet`
+    + place-name-shaped domain, e.g. `visitbeulah.com`) — domain-level
+    only, gated in `junk_filter.check_lead` (§6a rule 5a), NOT in the
+    pre-scrape blocklist. Two real false positives were caught and fixed
+    here, both by actually re-running the rule against real production
+    data (not just the reported cases) before calling it done:
+    1. Started fully unconditional, like the two rules above. Caught
+       "World Of Smiles Pediatric Dentistry" at `visitworldofsmiles.com`
+       — a genuine, verified Portland, OR pediatric dental practice
+       (confirmed via direct lookup: real address, phone, founder, Yelp
+       reviews) using "visit" as ordinary marketing language, not a
+       tourism-board convention. Fixed by gating on the vertical's own
+       keyword being absent from the extracted name (same pattern as the
+       existing "hospital" conditional term).
+    2. That fix then let real tourism-site mis-scrapes back in whenever
+       the scraped name happened to contain a vertical keyword too (e.g.
+       "Expressions Floral" mentioned on Gilroy, CA's own tourism site,
+       `visitgilroy.com` — "Floral" is literally in the business's name,
+       so the keyword-absence gate alone wasn't enough). Fixed with a
+       second, stricter signal: `blocklist.tourism_domain_place_slug`
+       extracts the part of the domain after "visit"/"discover"/
+       "explore"/"meet" (e.g. "gilroy", or "worldofsmiles") and the rule
+       now also requires that slug to actually appear in the business's
+       own normalized name. World Of Smiles keeps passing (its slug IS
+       its name); Expressions Floral now correctly fails (Gilroy has
+       nothing to do with that florist's own name) and gets dropped.
+       This is a strict tightening — it can only catch MORE junk than
+       the keyword-only gate, never less, so it can't reintroduce case 1.
+    `is_chamber_domain` stayed fully unconditional throughout (no real
+    business's own domain plausibly ends in "chamber.\<tld\>", unlike
+    "visit…", which can be ordinary marketing language on a real site).
+  - A THIRD false positive, found later re-running the (by-then-general)
+    rules against the live Dental Practices database, not the Event/
+    Floral one: an early version added "meet" to the **unconditional
+    NAME** pattern (`^\s*(visit|discover|explore|meet)\s+\w`) after
+    finding "Meet Minneapolis" (minneapolis.org, a real Convention &
+    Visitors Association, confirmed via lookup — the domain itself
+    doesn't say "meet", only the extracted name does). That pattern then
+    wrongly caught "Meet Dr. Unruh" and "Meet Dr. Duke Trinh at All
+    Smiles in Smyrna, TN" — an extremely common staff/founder bio-page
+    title convention on a REAL practice's own site, across every
+    vertical, not a tourism signal at all. Reverted: the NAME pattern
+    stays `visit|discover|explore` only (no "meet"); "Meet Minneapolis"
+    is instead covered by an explicit `minneapolis.org` blocklist entry,
+    and "meet" was kept only in the DOMAIN-prefix form of
+    `is_tourism_domain` (protected by the same slug-relation gate above,
+    a much narrower and safer surface than a free-standing name pattern —
+    confirmed this also correctly catches a second real case, "Meet
+    Charleston, SC" at meetcharleston.com). The two wrongly-dropped Dental
+    Practices rows were restored to `leads.csv` from their original
+    archived export snapshots, not just re-added by hand.
   - `junk_filter._KNOWN_JUNK_COMPANY_NAMES` — exact-match backstop for
     "Business Data Provider" / "Yellow Pages USA" / "Social Tables" /
     "Here Comes the Guide" (no domain given in the original report;
     domains for the latter two — socialtables.com, herecomestheguide.com
     — and two more found by re-running the rules against real data
     (poidata.io, ypages.us) were confirmed via web lookup and added to
-    the blocklist directly, so this backstop is now mostly redundant for
-    those specific names but stays as a safety net).
+    the blocklist directly).
   - `_OFF_TARGET_NAME_PATTERNS`'s "Visit \<Placename\>" pattern extended to
-    also match "Discover"/"Explore" (same CVB naming convention).
+    also match "Discover"/"Explore" (not "Meet" — see above).
   - `GENERIC_EMAIL_PREFIXES` +5 (`chamber`, `chamberinfo`, `citymanager`,
-    `cvb`, `tourism`).
-  - `blocklist.py` domain-set additions: `archive.org` → `PLATFORM_DOMAINS`;
-    new `NEWS_AND_MEDIA_DOMAINS` (8 local news/magazine sites, general —
-    not vertical-specific); new `GOVERNMENT_CHAMBER_TOURISM_DOMAINS` (6
-    specific confirmed domains not caught by the general TLD/suffix
-    checks); `EVENT_AND_FLORAL_DIRECTORY_DOMAINS` +17 (6 national wedding-
-    planner/media domains repeatedly scraped as local across many states,
-    8 more national flower-delivery aggregators, 3 confirmed directory/
-    data-broker domains). See §6/§6a for the full per-set breakdown.
-  - **Every new rule is general, not Event/Floral-specific** — wired into
-    the shared `should_skip_result` (pre-scrape) and `junk_filter.check_lead`
-    (post-scrape) functions every vertical/service already goes through,
-    per the user's explicit ask that "these kinda junk get filtered when
-    we choose other business type." Verified directly: re-ran the new
-    rules against the live Dental Practices `leads.csv` (unrelated to this
-    audit) and it correctly dropped 8 more rows (2 city/state government
-    health pages, 1 university health system, 4 community-college dental-
-    *hygiene training clinics*, 1 local newspaper) — none of which are a
-    real bookkeeping-client prospect — while correctly keeping "World Of
-    Smiles Pediatric Dentistry" once the precision fix above was in place.
-  - Verified every new rule against all ~27 originally-reported cases
-    (100% caught) plus a control set including two known-tricky adversarial
-    names ("Chambers Florist" as a hypothetical real business, and the
-    already-confirmed-real "Sitka Weddings & Events LLC" from the
-    2026-09-15 audit) — both correctly survive.
-  - **Applied retroactively**: the live `data/leads.csv` (Dental Practices,
-    1735 rows) rescanned and re-junk-filtered → 1727 rows, 8 dropped (see
-    above). Separately, all 9 Event Management + Floral export snapshots
-    from 2026-09-16/18/19 (5,446 combined rows after dedupe, covering all
-    50 states) were rescanned and re-junk-filtered → 5,359 kept (87
-    dropped), then saved as one new consolidated snapshot,
-    `data/exports/2026-09-24_EventManagement+FloralBusinesses_AllStates_cleaned.xlsx`
-    (1,015 with email), so the user can send from a single clean file
-    tonight instead of picking through 9 separate ones. The 9 original
-    (uncleaned) snapshots were moved — not deleted — to
-    `data/exports/_superseded_2026-09-24/` so they no longer appear in the
-    Send Emails/Send Texts "send from a saved run" picker (avoiding the
-    real risk of accidentally re-selecting an old, junk-containing
-    snapshot alongside the new clean one) while staying recoverable if
-    ever needed. None of this touched `data/leads.csv`'s *current*
-    contents beyond the Dental Practices rescan above — Event Management +
-    Floral data lives only in the exports archive right now, per §14's
-    existing "decouple scraping from sending" design.
+    `cvb`, `tourism`) — makes these addresses un-sendable at funnel time.
+  - `_NETWORK_TEMPLATE_EMAIL_PREFIXES` (§6a rule 6, previously just
+    `wecare`) extended with the same 5 — drops the ROW too, not just the
+    address, fixing cases where a government/chamber page's DOMAIN didn't
+    happen to match `is_chamber_domain`'s suffix shape but its email
+    prefix gave it away just as reliably (`chamber@pilotpoint.org`,
+    `chamber@elkonevada.com`).
+  - `blocklist.py` domain-set additions across all 4 sweeps: `archive.org`
+    → `PLATFORM_DOMAINS`; `24-7pressrelease.com` → `NEWSWIRE_DOMAINS`;
+    `NEWS_AND_MEDIA_DOMAINS` grew to 21 local/national news, TV, radio,
+    and magazine sites (general, not vertical-specific — several are
+    call-sign domains like `wsvn.com`/`wnbf.com`/`adn.com` with no "news"
+    in the domain at all, which is exactly why bare "news" stays
+    deliberately excluded from the automatic name pattern and these had
+    to be found and listed by hand); `GOVERNMENT_CHAMBER_TOURISM_DOMAINS`
+    grew to 25 specific confirmed domains not caught by the general TLD/
+    suffix/prefix checks (a county government site, a city government
+    site, a university athletics site, several tourism/CVB sites using
+    naming shapes the general rules don't cover, a chamber-management
+    SaaS vendor); `EVENT_AND_FLORAL_DIRECTORY_DOMAINS` +17 (6 national
+    wedding-planner/media domains, 8 national flower-delivery
+    aggregators, 3 directory/data-broker domains). See §6/§6a for the
+    full per-set breakdown.
+  - **Every new rule is general, not Event/Floral-specific**, per the
+    user's explicit ask — wired into the shared `should_skip_result`
+    (pre-scrape) and `junk_filter.check_lead` (post-scrape) functions
+    every vertical/service already goes through. Proven directly, twice:
+    the live Dental Practices `leads.csv` correctly lost 8 unrelated rows
+    (government health pages, a university health system, community-
+    college dental-*hygiene training clinics*, a newspaper) to the same
+    rules, and separately is where the "Meet Dr." false positive above
+    was actually caught.
+  - A broad, repeated manual-review sweep (not just automatic keyword
+    matching) also correctly identified real businesses that superficially
+    matched suspicious-looking keywords and left them alone — "Daily
+    Bloom", "State College Flowers", "College Station TX Florist",
+    "Chalet Floral & Events" (SEO-stuffed title mentioning "City Of
+    Muskegon") — all confirmed genuine local florists whose name or
+    domain merely contains an ordinary place name ("State College" and
+    "Collegeville" are real Pennsylvania towns). This is why the news/
+    government/tourism domain lists stay manually-curated, explicit lists
+    rather than a blanket keyword-based auto-drop.
+  - **Applied retroactively and re-verified after every fix**: the live
+    `data/leads.csv` (Dental Practices) ended at 1,726 rows (down from an
+    original 1,735, then briefly wrongly at 1,724 before the "Meet Dr."
+    restore). The Event Management + Floral data — 9 export snapshots
+    from 2026-09-16/18/19, 5,446 combined rows after dedupe, all 50
+    states — was rescanned from scratch after each rule change and ended
+    at **5,313 kept rows (133 dropped), 1,007 with email**, saved as one
+    consolidated snapshot,
+    `data/exports/2026-09-24_EventManagement+FloralBusinesses_AllStates_cleaned.xlsx`,
+    so the user can send from a single clean file instead of picking
+    through 9 separate ones. Final verification pass: exact-matched every
+    company/email from both of the user's reports (0 remaining) plus a
+    broad regex sweep across every category involved (chamber/gov/
+    tourism/cvb/visit/discover/explore/meet/news/press/university/
+    college/city-of/county-of — 0 remaining after manual review confirmed
+    the handful of real-business matches). The 9 original (uncleaned)
+    snapshots were moved — not deleted — to
+    `data/exports/_superseded_2026-09-24/` so they no longer appear in
+    the Send Emails/Send Texts "send from a saved run" picker (avoiding
+    the real risk of accidentally re-selecting an old, junk-containing
+    snapshot alongside the new clean one) while staying recoverable, and
+    were also what made restoring the 2 wrongly-dropped Dental Practices
+    rows possible (their full original data, not just company name +
+    domain, was recovered from these archives rather than re-typed).
 - **2026-09-23 (frontend re-themed to the client's brand colors)** — User
   request: make the dashboard "more fancy" using the colors from the email
   signature logo. See §2a for the full mechanism. Short version:

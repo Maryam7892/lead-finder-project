@@ -66,6 +66,32 @@ NEWS_AND_MEDIA_DOMAINS = {
     "fox13now.com", "noozhawk.com", "strictlybusinessomaha.com",
     "rimonthly.com", "buckrail.com", "nspiretoday.com", "siouxfalls.business",
     "breckenridgetexan.com",
+    # found in a second sweep of the same nationwide Event Management +
+    # Floral audit (2026-09-24) — local/national TV, radio, and newspaper
+    # sites, several using call-sign-style domains with no "news" word in
+    # them at all (adn.com, denver7.com, wsvn.com, wnbf.com), which is
+    # exactly why these have to be listed explicitly rather than caught by
+    # a general "news" pattern (bare "news" stays deliberately excluded
+    # from the newspaper-masthead name pattern — see §6a — since it's too
+    # generic on its own).
+    "communityimpact.com", "adn.com", "denver7.com", "melbournenews.net",
+    "eastidahonews.com", "wsvn.com", "wnbf.com", "news5cleveland.com",
+    "thezebra.org", "foxnews.com", "dailymemphian.com", "wvmetronews.com",
+    "livelocalmagazines.com",
+    # third sweep, same audit — a "Free Press", a business journal, a
+    # "Weekly", and 3 more newspapers found by manually reviewing every
+    # remaining name matching a broad news/media keyword set (most of that
+    # broad sweep's hits — "Daily Bloom", "State College Flowers", "Chalet
+    # Floral & Events", etc. — turned out to be genuine local businesses
+    # whose name or domain just happens to contain a place name like
+    # "College Station" or "Collegeville"; those were correctly left
+    # alone, confirming why this stays a manually-reviewed, explicit list
+    # rather than an automatic keyword drop).
+    "fcfreepresspa.com", "businessjournaldaily.com", "detroitweekly.org",
+    "pressherald.com", "thefallonpost.org", "devilslakejournal.com",
+    # fourth (final) sweep — two local TV news stations (WOAI/San
+    # Antonio, ABC7/San Francisco).
+    "news4sanantonio.com", "abc7news.com",
 }
 
 # City/county/state government sites, chambers of commerce, and tourism /
@@ -78,6 +104,40 @@ NEWS_AND_MEDIA_DOMAINS = {
 GOVERNMENT_CHAMBER_TOURISM_DOMAINS = {
     "discoverdunwoody.com", "greenwichchamber.com", "greenvillechamber.com",
     "masontx.org", "tylertexas.com", "visitbeulah.com",
+    # found in a second audit pass over the same nationwide Event
+    # Management + Floral dataset (2026-09-24) — domain shapes the general
+    # is_chamber_domain/is_tourism_domain checks don't cover: a chamber-
+    # of-commerce MEMBERSHIP SOFTWARE vendor (not a chamber itself, but
+    # the same "never a real target business" reasoning applies) and a
+    # state tourism site using "<abbr>tourism.com" instead of the more
+    # common "visit<place>.com" shape.
+    "chamberorganizer.com", "wvtourism.com",
+    # specific confirmed tourism/CVB and government/chamber domains that
+    # slipped through the conditional is_tourism_domain check because the
+    # mis-scraped business name happened to contain a vertical keyword —
+    # see junk_filter.py's tourism-domain-vs-business-name-slug check for
+    # the general fix; these are the confirmed cases from that audit.
+    "visitgilroy.com", "discoverwichitafalls.com", "visitshiner.com",
+    "visitwilmingtonde.com", "visitfingerlakes.com", "visitroanokeva.com",
+    "visitchesapeake.com", "visitfrederick.org", "visitomaha.com",
+    "visitwv.com", "visiteauclaire.com", "visitlaramie.org",
+    "pilotpoint.org", "elkonevada.com",
+    # "Meet Minneapolis" — a real Convention & Visitors Association,
+    # confirmed via direct lookup. Domain itself doesn't match any general
+    # pattern (no "meet"/"visit"/chamber/.gov shape at all), so it's
+    # listed explicitly here as well as being covered by the NAME-level
+    # "Meet <Placename>" pattern in junk_filter.py.
+    "minneapolis.org",
+    # third sweep of the same audit, 2026-09-24 — a county government site
+    # and a city government site on non-.gov domains, and a university
+    # athletics site on a non-.edu domain, none of which is_institutional_tld
+    # would catch.
+    "smcgov.org", "cityoflajoya.com", "msuspartans.com",
+    # fourth (final) sweep, same audit — a chamber and a CVB whose domain
+    # names don't fit the "…chamber.<tld>" or "visit<place>.com" shapes
+    # (healdsburg.com, kerrvillecrafted.com), confirmed via the name
+    # literally saying "Chamber" / "CVB".
+    "healdsburg.com", "kerrvillecrafted.com",
 }
 
 # Dictionary/reference sites — these rank for generic query words like
@@ -103,7 +163,7 @@ SOFTWARE_VENDOR_DOMAINS = {
 # distributor, not the business the article is about.
 NEWSWIRE_DOMAINS = {
     "einnews.com", "prnewswire.com", "businesswire.com", "globenewswire.com",
-    "fintechworldpost.com",
+    "fintechworldpost.com", "24-7pressrelease.com",
 }
 
 # Academic/journal publishers and exam-prep sites — occasionally collide on
@@ -493,7 +553,14 @@ def is_chamber_domain(domain: str) -> bool:
 # "Bloom 'n House". Anchored to the START of the domain's first label only,
 # not a bare substring anywhere, so a real business domain that merely
 # CONTAINS one of these words elsewhere isn't caught. Added 2026-09-24.
-_TOURISM_DOMAIN_PREFIX_RE = re.compile(r"^(visit|discover|explore)[a-z]", re.I)
+# "meet" added the same day — "Meet Minneapolis" (minneapolis.org, a real
+# Convention & Visitors Association, confirmed via direct lookup) uses the
+# same destination-marketing convention with a different verb ("Meet
+# Boston", "Meet AC" are other real examples of this exact naming
+# pattern). Same conditional-with-slug-check safety net in junk_filter.py
+# applies, so a hypothetical unrelated "meet"-prefixed real business
+# domain still isn't at real risk.
+_TOURISM_DOMAIN_PREFIX_RE = re.compile(r"^(visit|discover|explore|meet)[a-z]", re.I)
 
 
 def is_tourism_domain(domain: str) -> bool:
@@ -501,6 +568,24 @@ def is_tourism_domain(domain: str) -> bool:
         return False
     first_label = domain.lower().split(".")[0]
     return bool(_TOURISM_DOMAIN_PREFIX_RE.match(first_label))
+
+
+def tourism_domain_place_slug(domain: str) -> str:
+    """
+    The part of a "visit<x>"/"discover<x>"/"explore<x>" domain after the
+    verb — e.g. "visitworldofsmiles.com" -> "worldofsmiles",
+    "visitgilroy.com" -> "gilroy". Used by junk_filter to distinguish a
+    real business's own domain (the slug IS the business's name, e.g.
+    "worldofsmiles" for World Of Smiles Pediatric Dentistry) from a genuine
+    tourism site whose slug is an unrelated place name (e.g. "gilroy" has
+    nothing to do with a florist called "Expressions Floral" that merely
+    got mentioned on that tourism site's own page).
+    """
+    first_label = domain.lower().split(".")[0]
+    for prefix in ("visit", "discover", "explore"):
+        if first_label.startswith(prefix):
+            return first_label[len(prefix):]
+    return first_label
 
 
 def should_skip_result(url: str, domain: str, title: str, snippet: str = "", service: str = "",

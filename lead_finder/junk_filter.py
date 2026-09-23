@@ -70,6 +70,15 @@ _OFF_TARGET_NAME_PATTERNS = [
     # convention, different verb. See also blocklist.is_tourism_domain,
     # which catches the no-space domain form of the same convention
     # ("visitbeulah.com") when the extracted NAME doesn't say "Visit ...".
+    # Deliberately does NOT include "meet" (tried and reverted the same
+    # day): "Meet Minneapolis" is a real CVB, but "Meet Dr. Unruh" / "Meet
+    # Dr. Duke Trinh at All Smiles in Smyrna, TN" are ordinary staff/
+    # founder bio-page titles — an extremely common convention on a real
+    # practice's OWN site, across every vertical, not just dental. Caught
+    # by re-running this rule against the live Dental Practices database
+    # before finalizing, the same way the World Of Smiles false positive
+    # was caught. "Meet Minneapolis" itself is still covered — via the
+    # explicit `minneapolis.org` blocklist entry instead.
     re.compile(r"^\s*(visit|discover|explore)\s+\w", re.I),
     re.compile(r"\bfilm\s*&?\s*tv production\b", re.I),
     # Local newspapers — masthead-style naming words that are essentially
@@ -129,7 +138,15 @@ _CONDITIONAL_OFF_TARGET_TERMS = [
 # than a distinct, independently-owned business. GENERIC_EMAIL_PREFIXES
 # already keeps these un-sendable; this drops the ROW too, since the user
 # doesn't want the network's page counted as a "company" at all.
-_NETWORK_TEMPLATE_EMAIL_PREFIXES = {"wecare"}
+# "chamber"/"chamberinfo"/"citymanager"/"cvb"/"tourism" added 2026-09-24 —
+# same reasoning, for government/chamber pages whose DOMAIN doesn't happen
+# to end in "chamber.<tld>" (so blocklist.is_chamber_domain misses it) but
+# whose email prefix gives it away just as reliably (e.g.
+# "chamber@pilotpoint.org", "chamber@elkonevada.com" — real cases found
+# in a nationwide Event Management + Floral audit).
+_NETWORK_TEMPLATE_EMAIL_PREFIXES = {
+    "wecare", "chamber", "chamberinfo", "citymanager", "cvb", "tourism",
+}
 
 _BROKEN_NAME_TOKENS = {
     "same", "full", "head", "home", "about", "contact", "menu", "welcome",
@@ -235,9 +252,25 @@ def check_lead(row: Dict, vertical_keywords: Optional[List[str]] = None) -> Tupl
     # is still correctly dropped. `is_chamber_domain` stays UNCONDITIONAL
     # (above, step 1) since no legitimate business's own domain ends in
     # "chamber.<tld>" — there's no equivalent false-positive path for it.
-    if not kw_hit and domain and not domain.startswith("osm:"):
-        if blocklist.is_tourism_domain(domain):
+    if domain and not domain.startswith("osm:") and blocklist.is_tourism_domain(domain):
+        if not kw_hit:
             return True, f"tourism/CVB-style domain with no matching vertical keyword ({domain})"
+        # kw_hit is True, but that alone isn't enough — a real business
+        # mentioned ON a tourism site's own page (e.g. "Expressions Floral"
+        # on visitgilroy.com's "local florists" listing) still has a
+        # vertical keyword in its NAME even though the DOMAIN is clearly
+        # not that business's own site. Require the domain's place slug to
+        # actually relate to the business name too (see
+        # tourism_domain_place_slug) — this can only make the rule catch
+        # MORE junk than kw_hit alone, never less, so it can't reintroduce
+        # the World Of Smiles false positive (its slug "worldofsmiles" IS
+        # contained in its own name). Added 2026-09-24 after a second
+        # audit pass found ~10 tourism-site mis-scrapes slipping through
+        # on exactly this gap.
+        slug = blocklist.tourism_domain_place_slug(domain)
+        name_norm = re.sub(r"[^a-z0-9]", "", name_l)
+        if slug and slug not in name_norm:
+            return True, f"tourism/CVB-style domain unrelated to business name ({domain})"
 
     # 6. Templated-network email prefix (e.g. "wecare@") — a strong signal
     # this is one page in a machine-generated multi-city network, not an
