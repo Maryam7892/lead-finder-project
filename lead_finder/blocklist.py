@@ -52,6 +52,32 @@ PLATFORM_DOMAINS = {
     "quora.com", "medium.com", "tiktok.com", "google.com", "bing.com",
     "yahoo.com", "duckduckgo.com", "amazon.com", "apple.com", "bestbuy.com",
     "zhihu.com", "heylink.me",
+    "archive.org",  # non-profit digital library, not a business of any kind
+                    # (found under Event Management/Floral, 2026-09-24 audit)
+}
+
+# Local/regional news outlets, magazines, and media/blog sites — general,
+# not vertical-specific (a news outlet can rank for "<city> event companies"
+# or "<city> florists" just as easily as any other query). Found in a
+# 2026-09-24 Event Management + Floral audit across many states; kept
+# separate from EVENT_AND_FLORAL_DIRECTORY_DOMAINS since these aren't
+# wedding/floral-specific and could turn up under any vertical.
+NEWS_AND_MEDIA_DOMAINS = {
+    "fox13now.com", "noozhawk.com", "strictlybusinessomaha.com",
+    "rimonthly.com", "buckrail.com", "nspiretoday.com", "siouxfalls.business",
+    "breckenridgetexan.com",
+}
+
+# City/county/state government sites, chambers of commerce, and tourism /
+# convention-and-visitors-bureau (CVB) sites. General, not vertical-specific
+# — a chamber or a .gov page ranks for "<city> <any service> companies" just
+# as readily as a real business would. Found in a 2026-09-24 Event
+# Management + Floral audit. See also is_institutional_tld (.gov/.edu) and
+# is_chamber_domain / is_tourism_domain below, which generalize this beyond
+# a fixed list for future finds.
+GOVERNMENT_CHAMBER_TOURISM_DOMAINS = {
+    "discoverdunwoody.com", "greenwichchamber.com", "greenvillechamber.com",
+    "masontx.org", "tylertexas.com", "visitbeulah.com",
 }
 
 # Dictionary/reference sites — these rank for generic query words like
@@ -150,6 +176,23 @@ EVENT_AND_FLORAL_DIRECTORY_DOMAINS = {
     # travel/food blog, and a gambling/casino content blog with no
     # relation to flowers at all.
     "travelsitka.com", "travelcookeat.com", "techntrip.com",
+    # found in a nationwide (all-states) Event Management + Floral audit
+    # (2026-09-24): national wedding-planner/media pages repeatedly
+    # scraped as if local across many different states.
+    "weddingelegance.nyc", "orchidblossomevents.com", "junebugweddings.com",
+    "stylemepretty.com", "weddingforward.com", "postalpetals.com",
+    "socialtables.com", "herecomestheguide.com", "yellowpagesdirectory.com",
+    # national flower-delivery aggregators — same shape as the existing
+    # national flower-order gateways above, just a later batch found in
+    # the same audit.
+    "terrysflorist.com", "flowersbyeva.com", "odealarose.com",
+    "bloomypresents.com", "cityflowershop.com", "flowersezgo.com",
+    "theflowershop.com", "quickflowerdelivery.com",
+    # confirmed real domains behind two of the _KNOWN_JUNK_COMPANY_NAMES
+    # entries in junk_filter.py (found by retroactively re-running the new
+    # rules against real data, not guessed) — a POI/business-data API
+    # provider and a Yellow Pages reseller.
+    "poidata.io", "ypages.us",
 }
 
 # A business still on a website-builder's free default subdomain (never
@@ -169,7 +212,8 @@ ALL_BLOCKED_DOMAINS = (
     | SOFTWARE_VENDOR_DOMAINS | NEWSWIRE_DOMAINS | PUBLISHER_DOMAINS
     | OFFSHORE_BPO_DOMAINS | SAAS_AND_TEMPLATED_DIRECTORY_DOMAINS
     | EVENT_AND_FLORAL_DIRECTORY_DOMAINS | WEBSITE_BUILDER_DEFAULT_DOMAINS
-    | FOREIGN_BUSINESS_DOMAINS
+    | FOREIGN_BUSINESS_DOMAINS | NEWS_AND_MEDIA_DOMAINS
+    | GOVERNMENT_CHAMBER_TOURISM_DOMAINS
 )
 
 # Title patterns that strongly indicate a "Top N" / "Best of" listicle
@@ -238,6 +282,11 @@ GENERIC_EMAIL_PREFIXES = {
     "newsletter", "updates", "alerts", "webmaster", "security", "abuse",
     "legal", "privacy", "compliance", "compliances", "it", "tech",
     "technical", "developer", "asap", "urgent",
+    # government / chamber / tourism shared-role addresses (added
+    # 2026-09-24, same nationwide Event Management + Floral audit that
+    # added the chamber/tourism domain checks above) — "citymanager@",
+    # "chamberinfo@" etc. are role inboxes the same way "support@" is.
+    "chamber", "chamberinfo", "citymanager", "cvb", "tourism",
 }
 # "hi" (Squarespace/Wix default), "contact" (near-universal generic-form
 # address), "wecare"/"custservice" (templated support-inbox variants seen
@@ -403,14 +452,74 @@ def is_foreign_tld(domain: str) -> bool:
     return any(low.endswith(tld) for tld in _FOREIGN_TLDS)
 
 
+# .gov and .edu are structurally never a small business we'd cold-email —
+# a city/county/state government office or a university, not a bookkeeping/
+# event/floral/etc. client. Added 2026-09-24 after "Kelley School of
+# Business" (iu.edu) and "City Of Stockdale" (stockdaletx.gov) turned up in
+# a nationwide Event Management + Floral audit. Safe and general on
+# purpose — unlike foreign TLDs, which merely correlate with "wrong
+# business," a .gov/.edu domain essentially can't belong to a genuine
+# private-sector lead at all.
+_INSTITUTIONAL_TLDS = (".gov", ".edu")
+
+
+def is_institutional_tld(domain: str) -> bool:
+    if not domain:
+        return False
+    low = domain.lower()
+    return any(low.endswith(tld) for tld in _INSTITUTIONAL_TLDS)
+
+
+# A chamber of commerce's domain name varies per city ("greenwichchamber.com",
+# "greenvillechamber.com", ...) so no fixed list keeps up — this anchors on
+# the domain ending in "chamber.<tld>" (the actual observed naming
+# convention) rather than a bare "chamber" substring, which would also
+# false-positive a real business legitimately named "Chambers Florist" or
+# similar. Added 2026-09-24 from the same audit.
+_CHAMBER_DOMAIN_RE = re.compile(r"chamber\.(com|org|net|us|info)$", re.I)
+
+
+def is_chamber_domain(domain: str) -> bool:
+    if not domain:
+        return False
+    return bool(_CHAMBER_DOMAIN_RE.search(domain.lower()))
+
+
+# Tourism-board / convention-and-visitors-bureau sites very often name their
+# domain "visit<place>.com" / "discover<place>.com" / "explore<place>.com"
+# with no space (so the equivalent NAME-based pattern in junk_filter.py,
+# which requires "Visit <Placename>" as separate words, doesn't catch it) —
+# e.g. "visitbeulah.com", scraped under the unrelated extracted name
+# "Bloom 'n House". Anchored to the START of the domain's first label only,
+# not a bare substring anywhere, so a real business domain that merely
+# CONTAINS one of these words elsewhere isn't caught. Added 2026-09-24.
+_TOURISM_DOMAIN_PREFIX_RE = re.compile(r"^(visit|discover|explore)[a-z]", re.I)
+
+
+def is_tourism_domain(domain: str) -> bool:
+    if not domain:
+        return False
+    first_label = domain.lower().split(".")[0]
+    return bool(_TOURISM_DOMAIN_PREFIX_RE.match(first_label))
+
+
 def should_skip_result(url: str, domain: str, title: str, snippet: str = "", service: str = "",
                         keywords: Optional[List[str]] = None) -> bool:
     """Single entry point: True if this search result shouldn't be scraped as a company."""
+    # is_tourism_domain is deliberately NOT included here — a "visit"-
+    # prefixed domain can also just be a real business's own marketing
+    # language ("visitworldofsmiles.com", a genuine pediatric dental
+    # practice), and this pre-scrape stage doesn't yet have the real
+    # extracted company name to check that safely against the vertical's
+    # keywords the way junk_filter.check_lead's conditional check does
+    # post-scrape. See junk_filter.py step 5a.
     combined_text = f"{title} {snippet}"
     return (
         is_ad_or_tracking_url(url)
         or is_blocked_domain(domain)
         or is_foreign_tld(domain)
+        or is_institutional_tld(domain)
+        or is_chamber_domain(domain)
         or looks_like_listicle(title)
         or looks_like_bot_check(title)
         or not is_relevant(combined_text, service, keywords)

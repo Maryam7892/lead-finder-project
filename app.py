@@ -1,8 +1,10 @@
+import base64
 import io
 import os
 import threading
 import time
 from datetime import datetime
+from functools import lru_cache
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +20,24 @@ load_dotenv(override=True)  # .env always wins over a stray shell-exported var o
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SENT_RECORDS_DIR = os.path.join(DATA_DIR, "sent_records")
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "lead_finder", "assets")
+
+
+@lru_cache(maxsize=1)
+def _logo_data_uri() -> str:
+    """Base64 data URI for the brand logo, used in the header banner.
+    Reads logo_header.png, not signature_logo.png. The email signature
+    uses the flat-white original, which is fine inside an email body, but
+    on this app's dark header it rendered as an ugly white box, so a
+    transparent cutout was generated once (white background thresholded
+    to alpha 0, soft edge to avoid a jagged fringe) and saved as a
+    separate asset. The app's whole gold/black palette is pulled from
+    this same logo (see the 2026-09-23 CLAUDE.md change log entry) so
+    the dashboard and the outbound email signature read as one brand."""
+    path = os.path.join(ASSETS_DIR, "logo_header.png")
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Leads") -> bytes:
@@ -76,7 +96,7 @@ def _write_daily_sent_records_csv(results):
 
 st.set_page_config(
     page_title="Lead Finder",
-    page_icon="📇",
+    page_icon="📈",
     layout="wide",
 )
 
@@ -184,50 +204,139 @@ CONFIDENCE_BADGE = {
 }
 
 # ---------------------------------------------------------------- styling --
+# Palette pulled directly from lead_finder/assets/signature_logo.png (the
+# same file the email signature embeds) so the dashboard and the outbound
+# emails read as one brand instead of two unrelated looks. Gold #E3BC30 /
+# #F2D571, ink #0A0A0A, warm off-white text. See CLAUDE.md change log,
+# 2026-09-23 entry, for the exact extracted values.
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
+
+    :root {
+        --gold: #E3BC30;
+        --gold-light: #F2D571;
+        --gold-dim: #8a6f1e;
+        --ink: #0A0A0A;
+        --card: #17171b;
+        --card-hover: #1c1c21;
+        --border: #2c2a22;
+        --text-muted: #a8a396;
+    }
+
     .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1400px; }
 
-    /* Metric cards */
+    h1, h2, h3, .lf-hero-title { font-family: 'Sora', sans-serif; }
+
+    /* ---------------------------------------------------------- hero header */
+    .lf-hero {
+        display: flex; align-items: center; gap: 22px;
+        padding: 22px 28px;
+        margin-bottom: 1.6rem;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #141412 0%, #0c0c0b 60%, #141210 100%);
+        border: 1px solid var(--border);
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    }
+    .lf-hero::after {
+        content: "";
+        position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+        background: linear-gradient(90deg, transparent, var(--gold), var(--gold-light), var(--gold), transparent);
+        background-size: 200% 100%;
+        animation: lf-shimmer 5s linear infinite;
+    }
+    @keyframes lf-shimmer {
+        0% { background-position: 0% 0; }
+        100% { background-position: 200% 0; }
+    }
+    .lf-hero-logo {
+        height: 56px; width: auto; flex-shrink: 0;
+        filter: drop-shadow(0 2px 10px rgba(227,188,48,0.25));
+    }
+    .lf-hero-title {
+        font-size: 2.1rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1;
+        background: linear-gradient(90deg, var(--gold-light), var(--gold) 55%, #b3892a);
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+        margin: 0;
+    }
+    .lf-hero-tagline { color: var(--text-muted); margin-top: 0.35rem; font-size: 1.0rem; }
+    .lf-hero-chip {
+        display: inline-block; margin-top: 0.6rem;
+        padding: 3px 12px; border-radius: 999px;
+        border: 1px solid var(--gold-dim);
+        color: var(--gold-light); font-size: 0.72rem; font-weight: 700;
+        letter-spacing: 0.06em; text-transform: uppercase;
+    }
+
+    /* ------------------------------------------------------------- metrics */
     div[data-testid="stMetric"] {
-        background: #1a1d29;
-        border: 1px solid #33283f;
-        border-radius: 12px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--gold);
+        border-radius: 10px;
         padding: 16px 20px;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 18px rgba(227,188,48,0.12);
+        background: var(--card-hover);
     }
     div[data-testid="stMetric"] label,
-    div[data-testid="stMetricLabel"] { color: #9aa0ae !important; }
-    div[data-testid="stMetricValue"] { color: #f3ecff !important; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { color: var(--text-muted) !important; }
+    div[data-testid="stMetricValue"] { color: var(--gold-light) !important; font-weight: 700; }
 
-    /* Headings */
-    h1 { font-weight: 800; letter-spacing: -0.02em; color: #f3ecff; }
-    h2, h3 { letter-spacing: -0.01em; color: #e8e9ed; }
-    .lf-subtitle { color: #9aa0ae; margin-top: -0.6rem; margin-bottom: 1.2rem; font-size: 1.02rem; }
+    /* ------------------------------------------------------------ headings */
+    h1 { font-weight: 800; letter-spacing: -0.02em; color: #f2efe6; }
+    h2, h3 { letter-spacing: -0.01em; color: #e9e5d8; }
+    .lf-subtitle { color: var(--text-muted); margin-top: -0.6rem; margin-bottom: 1.2rem; font-size: 1.02rem; }
     .lf-section-label {
-        color: #d68bff; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em;
+        color: var(--gold); font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em;
         text-transform: uppercase; margin-bottom: 0.3rem; margin-top: 0.4rem;
     }
+    .lf-section-label::before { content: "◆ "; font-size: 0.65rem; }
 
-    /* Buttons */
+    /* -------------------------------------------------------------- buttons */
     div[data-testid="stButton"] button[kind="primary"] {
-        background: #b83df5; border: none; font-weight: 600; color: #ffffff;
+        background: linear-gradient(135deg, var(--gold-light), var(--gold) 70%);
+        border: none; font-weight: 700; color: var(--ink);
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
     }
-    div[data-testid="stButton"] button[kind="primary"]:hover { background: #a52ce3; }
+    div[data-testid="stButton"] button[kind="primary"]:hover {
+        background: linear-gradient(135deg, var(--gold-light), var(--gold-light) 70%);
+        box-shadow: 0 4px 16px rgba(227,188,48,0.35);
+        transform: translateY(-1px);
+    }
     div[data-testid="stButton"] button[kind="secondary"] {
-        border: 1px solid #33283f; background: transparent; color: #cfd2dc;
+        border: 1px solid var(--border); background: transparent; color: #d8d3c4;
+        transition: border-color 0.12s ease, color 0.12s ease;
+    }
+    div[data-testid="stButton"] button[kind="secondary"]:hover {
+        border-color: var(--gold-dim); color: var(--gold-light);
     }
 
-    /* Dataframe */
-    .stDataFrame { border: 1px solid #33283f; border-radius: 10px; overflow: hidden; }
+    /* ----------------------------------------------------------- dataframe */
+    .stDataFrame { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 
-    /* Tabs */
-    button[data-baseweb="tab"] { font-weight: 600; }
-    button[data-baseweb="tab"][aria-selected="true"] { color: #d68bff; }
+    /* --------------------------------------------------------------- tabs */
+    button[data-baseweb="tab"] { font-weight: 600; color: var(--text-muted); }
+    button[data-baseweb="tab"][aria-selected="true"] { color: var(--gold-light); }
+    div[data-baseweb="tab-highlight"] { background-color: var(--gold) !important; height: 3px !important; }
+    div[data-baseweb="tab-border"] { background-color: var(--border) !important; }
 
-    /* Alerts / info boxes tighter radius */
+    /* ---------------------------------------------------- alerts / dividers */
     div[data-testid="stAlert"] { border-radius: 10px; }
+    hr { border-color: var(--border); }
 
-    hr { border-color: #33283f; }
+    /* ------------------------------------------------------------ scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: #101012; }
+    ::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, var(--gold), var(--gold-dim));
+        border-radius: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -253,10 +362,18 @@ if "browser_retry_state" not in st.session_state:
     st.session_state.browser_retry_state = None
 
 # -------------------------------------------------------------------- header --
-st.title("📇 Lead Finder")
 st.markdown(
-    '<p class="lf-subtitle">Find prospective clients by service and state, '
-    'pull their public contact details, and draft outreach in one place.</p>',
+    f'''
+    <div class="lf-hero">
+        <img class="lf-hero-logo" src="{_logo_data_uri()}" alt="Profit Path Solution logo" />
+        <div>
+            <p class="lf-hero-title">Lead Finder</p>
+            <p class="lf-hero-tagline">Find prospective clients by service and state, pull their
+            public contact details, and draft outreach in one place.</p>
+            <span class="lf-hero-chip">Email + SMS outreach, built in</span>
+        </div>
+    </div>
+    ''',
     unsafe_allow_html=True,
 )
 
@@ -1808,7 +1925,7 @@ with tab_text:
                             "state": state_names[0] if state_names else "Texas", "owner_name": "",
                         }
                         body = email_template.render_sms_for_lead(test_lead, active_sms_variant)
-                        success, error = texter.send_text(texting_config, test_number.strip(), f"[TEST] {body}")
+                        success, error = texter.send_text(texting_config, test_number.strip(), f"TEST SMS: {body}")
                         if success:
                             st.success(f"Test text ({active_sms_variant}) sent to {test_number.strip()}.")
                         else:

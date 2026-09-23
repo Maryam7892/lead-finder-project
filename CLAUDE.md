@@ -65,7 +65,8 @@ through manually. This file is the contract that makes that possible.
   Database, Email Template, Send Emails, Send Texts, Bulk Send). ~2,125 lines.
 - Logic package: [`lead_finder/`](lead_finder/).
 - All persistent state is flat files in [`data/`](data/) (see §12).
-- Theme: `.streamlit/config.toml` (dark theme + `server.headless`).
+- Theme: `.streamlit/config.toml` (dark theme + `server.headless`) plus a
+  custom CSS block + hero header at the top of `app.py` (see §2a).
 - `.env` holds all secrets and is gitignored. `.env.example` is the
   template. Git repo since 2026-09-15, pushed to a public GitHub remote.
 
@@ -87,6 +88,61 @@ through manually. This file is the contract that makes that possible.
 | `email_template.py` | Per-service + per-vertical email templates, SMS templates, merge-field render to text/HTML | Send anything |
 | `mailer.py` | SMTP send, rate-limited batch, sent-log, shared suppression list, HTML signature builder | Send without an explicit call |
 | `texter.py` | 8x8 Connect SMS send, rate-limited batch, sent-text-log, E.164 formatting | Send without an explicit call |
+
+---
+
+## 2a. Frontend theme (brand palette + hero header)
+
+Added 2026-09-23, user request ("use the colors inside the signature logo
+for the frontend... make it more fancy"). Two layers, both in `app.py`
+unless noted:
+
+- **`.streamlit/config.toml`** sets the base Streamlit theme tokens:
+  `primaryColor = "#E3BC30"` (gold), `backgroundColor = "#0b0b0d"`,
+  `secondaryBackgroundColor = "#18181c"`, `textColor = "#f2efe6"`. These
+  are extracted directly from `lead_finder/assets/signature_logo.png` (the
+  same file the email signature embeds via `mailer.get_signature_inline_images()`
+  — see §11) — gold `#E3BC30`/`#F2D571`, ink `#0A0A0A`. Confirmed via a
+  pixel-count script, not eyeballed. Replaces the earlier unrelated purple
+  theme (`#b83df5`), which had no connection to the client's actual brand.
+- **A custom `<style>` block** (`app.py`, right after `st.set_page_config`)
+  layers a fancier look on top: a Google Font import (`Sora`, headings
+  only), CSS variables for the palette, a gradient-text app title, gold
+  left-border accent + hover-lift on metric cards, a gold gradient on
+  primary buttons with a hover glow, a gold underline on the active tab,
+  a gold-tinted scrollbar, and a hero header banner (below) with an
+  animated shimmering gold divider bar under it. Every hardcoded color in
+  this block traces back to the two logo colors above plus warm-white/
+  off-black neutrals — no unrelated colors were introduced.
+- **Hero header** (`app.py`, replacing the old plain `st.title(...)` call):
+  a bordered, rounded banner containing the brand logo and a gradient-gold
+  "Lead Finder" title, tagline, and a small pill chip ("Email + SMS
+  outreach, built in"). The logo is embedded as a base64 data URI via
+  `_logo_data_uri()` (`lru_cache`'d, reads the file once per process) so
+  no extra HTTP request or Streamlit `st.image` layout constraint is
+  needed to place it inline inside the flex header.
+- **`lead_finder/assets/logo_header.png`** — a **separate** asset from
+  `signature_logo.png`, generated once by a throwaway script, not hand-
+  edited. `signature_logo.png` is a flat RGB PNG with a solid white
+  background (verified: every pixel's alpha channel is 255, no
+  transparency at all) — correct for an email body, but it rendered as an
+  ugly opaque white box on this app's dark header. `logo_header.png` is a
+  transparent-background version of the same mark: white background
+  pixels thresholded to alpha 0 with a soft (not hard-cutoff) edge to
+  avoid a jagged fringe, AND — a second pass, needed after the first
+  version shipped with the black wordmark nearly invisible on the dark
+  header — every grayscale/black-ink pixel (text, bars) recolored to a
+  warm off-white (`#F2EFE6`) while true-color (gold) pixels are left
+  untouched, classified by RGB channel spread (`max - min > 40` = gold;
+  low spread = ink/background, regardless of how dark or antialiased).
+  This is the same idea as any brand having a separate light-logo variant
+  for dark backgrounds; `signature_logo.png` itself was **not** modified
+  and the email signature is unaffected. Verified via Playwright
+  screenshots of a live local instance, not just by reading the CSS: the
+  first version's silent-failure mode (illegible black-on-black wordmark)
+  was only caught this way, the same lesson as the 2026-09-18 progress-UI
+  `StatusContainer` gotcha — rendering-level bugs don't show up in code
+  review.
 
 ---
 
@@ -463,6 +519,21 @@ Returns True (skip, don't scrape) if **any** of:
   `.eu`, `.it`, `.es`, `.nl`, `.jp`, `.ru`, `.pl`, `.id`, `.vn`, `.ng`,
   `.ma`, and `.com.*` variants). US-state search → offshore domain almost
   always = wrong business.
+- `is_institutional_tld(domain)` (added 2026-09-24) — ends with `.gov` or
+  `.edu`. Unconditional and safe by construction, unlike the general
+  geography gap noted in §15: these TLDs are gate-kept and can't belong to
+  a private small business at all, so there's no realistic false-positive
+  path (confirmed against real data: correctly dropped city/county
+  government pages, a state health department, and several community-
+  college dental-hygiene *training* clinics, none of which are a real
+  bookkeeping-client prospect).
+- `is_chamber_domain(domain)` (added 2026-09-24) — domain ends in
+  `chamber.(com|org|net|us|info)`. Unconditional, also safe by
+  construction: chambers of commerce name their domains this way, and no
+  real target business would register "…chamber.com" as its OWN site —
+  the risk case would be a business literally named "Chambers Florist"
+  (`chambersflorist.com`), which this anchored-suffix pattern does **not**
+  match (verified as a control case).
 - `looks_like_listicle(title)` — matches any `_LISTICLE_PATTERNS`: `^top/best N`,
   `top N` mid-title, `N best/top`, `the best`, leading `top`/`best`, `vs`,
   `compare/comparison`, `guide to`, `how to / what is / what are / why`,
@@ -488,7 +559,19 @@ Returns True (skip, don't scrape) if **any** of:
 - `FREELANCE_DOMAINS` — Upwork, Fiverr, Freelancer, Guru, ...
 - `PLATFORM_DOMAINS` — Wikipedia, YouTube, Facebook, Instagram, X/Twitter,
   LinkedIn, Pinterest, Reddit, Quora, Medium, TikTok, Google, Bing, Yahoo,
-  Amazon, Apple, ...
+  Amazon, Apple, ..., archive.org (added 2026-09-24 — the Internet Archive,
+  not a business of any kind).
+- `NEWS_AND_MEDIA_DOMAINS` (added 2026-09-24) — local/regional news outlets
+  and magazines found in a nationwide Event Management + Floral audit
+  (Fox 13 News Utah, Noozhawk, Rhode Island Monthly, Buckrail, ...).
+  General, not vertical-specific — kept as its own set since a news site
+  can rank for any vertical's "<city> <service> companies" query.
+- `GOVERNMENT_CHAMBER_TOURISM_DOMAINS` (added 2026-09-24) — specific
+  confirmed city/county government, chamber-of-commerce, and tourism/CVB
+  domains not already caught by the general `is_institutional_tld` /
+  `is_chamber_domain` checks above (e.g. `.org`/`.com` government-style
+  sites like masontx.org, tylertexas.com — not `.gov`, so the TLD check
+  alone wouldn't catch them). General, not vertical-specific.
 - `REFERENCE_DOMAINS` — Merriam-Webster, Dictionary.com, Wiktionary,
   Britannica, Thesaurus.com, ... (rank for "best"/"small" in query
   phrasing).
@@ -537,6 +620,19 @@ Returns True (skip, don't scrape) if **any** of:
   and was NOT blocked), a travel/food blog (travelcookeat.com), and a
   gambling/casino content blog with zero relation to flowers
   (techntrip.com). Grow this list as more turn up in real result data.
+  Extended 2026-09-24 from a nationwide (all 50 states) Event Management +
+  Floral audit: 6 more national wedding-planner/media pages repeatedly
+  scraped as if local across many different states (weddingelegance.nyc,
+  orchidblossomevents.com, junebugweddings.com, stylemepretty.com,
+  weddingforward.com, postalpetals.com), plus 8 more national
+  flower-delivery aggregators (terrysflorist.com, flowersbyeva.com,
+  odealarose.com, bloomypresents.com, cityflowershop.com,
+  flowersezgo.com, theflowershop.com, quickflowerdelivery.com) and 3
+  confirmed directory/data-broker domains behind names that had no domain
+  in the original report (socialtables.com — Social Tables, now Cvent
+  Event Diagramming; herecomestheguide.com — Here Comes the Guide;
+  poidata.io / ypages.us — a POI/business-data API provider and a Yellow
+  Pages reseller, found by re-running the new rules against real data).
 - `FOREIGN_BUSINESS_DOMAINS` (added 2026-09-14, extended 2026-09-15) —
   `alfaridhospital.com` (a hospital in Qatar), `confidentalclinic.com` (a
   dental clinic in Purley, UK) — both surfaced under an Alabama Dental
@@ -575,11 +671,22 @@ positive silently deletes a real lead. Drops a row if **any**:
 
 1. `blocklist.is_blocked_domain(domain)` or `is_foreign_tld(domain)` —
    backstop for the pre-scrape filter, and catches domains added to the
-   blocklist after this row was collected. (Skipped for `osm:` rows.)
+   blocklist after this row was collected. (Skipped for `osm:` rows.) Also
+   `is_institutional_tld(domain)` (`.gov`/`.edu`) and `is_chamber_domain(domain)`
+   (added 2026-09-24, see §6) — both unconditional here too, same reasoning
+   as the pre-scrape versions.
 2. `blocklist.is_low_quality_name(name)` — listicle / keyword-salad / parked
    / unspaced-slug name (§10).
 3. Name is a nav-label fragment (`Home`, `About`, `Same`, `Full`, `Menu`,
    `404`, ...) or has no letters.
+3a. **Name** exactly matches `_KNOWN_JUNK_COMPANY_NAMES` (added 2026-09-24)
+   — specific recurring directory/media/software-product names found in a
+   nationwide audit with no confirmable domain to blocklist instead
+   ("Business Data Provider", "Yellow Pages USA", "Social Tables", "Here
+   Comes the Guide" — the last two later got real domains added to §6's
+   list too, so this is now a backstop for them, not the only catch).
+   Exact case-insensitive match, not a substring, so it can't collide with
+   an unrelated real business name.
 4. **Name** matches `_OFF_TARGET_NAME_PATTERNS` — "sells a service **to** an
    industry" or media/directory: `SEO/marketing/web-design … for/agency`,
    `citation checker/builder`, `… for <industry> companies`, `porta potty /
@@ -591,8 +698,10 @@ positive silently deletes a real lead. Drops a row if **any**:
    "Pierview Law" is dropped but "Law Gardens Florist" survives, since
    "Law" isn't the last word there), `box office / ticket sales`,
    `magazine / blog / podcast / directory`, `chamber of commerce / visitors
-   bureau / tourism board / turismo`, a name starting with `Visit
-   <Placename>` (destination-marketing sites), `film & tv production`,
+   bureau / tourism board / turismo`, a name starting with `Visit /
+   Discover / Explore <Placename>` (destination-marketing sites —
+   `discover`/`explore` added 2026-09-24 alongside the original `visit`,
+   same naming convention, different verb), `film & tv production`,
    newspaper-masthead words (`star-news/tribune/gazette/chronicle/...`),
    professional-association/academic-department names (`academy of /
    association of / society of / college of / school of / institute of ...
@@ -618,6 +727,26 @@ positive silently deletes a real lead. Drops a row if **any**:
    the name — so a genuine dental hospital/clinic (name also says
    "dental"/"dentist") is spared via the keyword check, only a hospital
    with no dental branding at all gets dropped.
+5a. **Domain** matches `blocklist.is_tourism_domain` (`visit<place>.com` /
+   `discover<place>.com` / `explore<place>.com`, no space) — same
+   conditional gate as rule 5, and deliberately **not** in the pre-scrape
+   blocklist or the unconditional domain check in rule 1. Added
+   2026-09-24, then narrowed the same day after it caught a real false
+   positive before shipping: "World Of Smiles Pediatric Dentistry" at
+   `visitworldofsmiles.com` is a genuine, verified Portland, OR pediatric
+   dental practice using "visit" as ordinary marketing language ("come
+   visit us"), not a tourism-board naming convention. Unlike
+   `is_chamber_domain` (rule 1, unconditional — no legitimate business's
+   own domain ends in "chamber.\<tld\>"), a "visit"-prefixed domain **can**
+   legitimately be a real business's own branding, so this is gated on the
+   vertical's own keyword being absent from the name, same as rule 5:
+   "World Of Smiles..." (name says "dentistry") is spared; "Bloom 'n
+   House" at `visitbeulah.com` (an actual Sitka-style tourism-board page,
+   name has no floral keyword) is still correctly dropped. Do not move
+   this back to an unconditional check, in the pre-scrape blocklist or
+   here, without re-confirming the World Of Smiles case stays kept — same
+   "don't revert without re-confirming" bar as the 2026-09-14 mailto:-
+   consumer-domain narrowing in §8.
 6. **Email prefix is in `_NETWORK_TEMPLATE_EMAIL_PREFIXES`** (`wecare`) —
    a shared, templated "customer care" address seen across many different
    city-named domains (`wecare@pomonasflorist.com`,
@@ -980,7 +1109,7 @@ All optional for finding/scraping. Required only for the feature named.
 | `TEST_EMAIL_ADDRESSES` | email | Optional comma-separated list for the "Send test email to" dropdown (Send Emails tab). Blank = only "Custom..." is offered. Moved out of `app.py` 2026-09-15 so real addresses aren't hardcoded into public source. |
 | `EIGHTXEIGHT_API_KEY` + `EIGHTXEIGHT_SUBACCOUNT_ID` | SMS | **Both** required or `get_active_texting_config()` returns None. From developer.8x8.com/connect. |
 | `EIGHTXEIGHT_SOURCE` | SMS | Optional Sender ID shown as "from". Blank = account default. |
-| `TEST_TEXT_NUMBERS` | SMS | Optional comma-separated list for the "Send test text to" dropdown (Send Texts tab), same pattern as `TEST_EMAIL_ADDRESSES`. Blank = only "Custom..." is offered. Added 2026-09-15. |
+| `TEST_TEXT_NUMBERS` | SMS | Optional comma-separated list for the "Send test text to" dropdown (Send Texts tab), same pattern as `TEST_EMAIL_ADDRESSES`. Blank = only "Custom..." is offered. Added 2026-09-15. **Must be US/Canada numbers** — the client's 8x8 subaccount only routes SMS to US/Canada destinations (confirmed 2026-09-22 after Pakistani test numbers showed HTTP 200 "success" from 8x8 but never arrived — an accepted-by-8x8 response does not mean delivered; international destinations outside 8x8's enabled routes are silently dropped downstream, not rejected at the API). |
 
 `app.py` calls `load_dotenv(override=True)` — `.env` beats a stray shell
 export of the same name. Restart the app after editing `.env`.
@@ -1042,7 +1171,11 @@ background thread → progress + results (persist after `eligible` empties).
    through even though it's semantically identical to a listed one (`care`).
    `hi`/`contact`/`wecare`/`custservice` were added after showing up
    unfiltered in real collected leads; if another variant turns up, add it
-   here rather than trying to generalize the match.
+   here rather than trying to generalize the match. `chamber`/
+   `chamberinfo`/`citymanager`/`cvb`/`tourism` added 2026-09-24 (same
+   nationwide audit that added the chamber/tourism domain checks in §6) —
+   government/chamber/CVB role addresses are shared inboxes the same way
+   `support@` is.
 5. Not suppressed (`mailer.is_suppressed(email, domain)`).
 6. If "Skip leads already emailed" (default on): domain not in
    `mailer.already_sent_domains()` (status `sent`).
@@ -1096,7 +1229,9 @@ templates are service-level only (`email_template.load_sms_template(service,
 variant)`, no `target_vertical` parameter — see §11), so there's no
 per-vertical template to test separately — what email covers with
 per-vertical rows, SMS covers with the variant picker (§11) instead,
-which the test send also respects. Message prefixed `[TEST]`.
+which the test send also respects. Message prefixed `TEST SMS: ` (changed
+2026-09-22 from `[TEST]` — a plain-language prefix reads better inside an
+actual SMS body than a bracketed tag does).
 
 ### Bulk Send (`Bulk Send` tab, added 2026-09-18)
 
@@ -1297,6 +1432,131 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
+- **2026-09-24 (nationwide Event Management + Floral audit; general
+  government/chamber/tourism/news filtering; real precision bug caught
+  before shipping)** — User audited a combined, all-50-states Event
+  Management + Floral database (built from several search runs across
+  2026-09-16/18/19) and reported ~24 distinct junk companies plus two
+  broader patterns (national flower-delivery aggregators; generic
+  directory/media names). Investigated each and fixed:
+  - New `blocklist.is_institutional_tld` (`.gov`/`.edu`, unconditional —
+    see §6) and `is_chamber_domain` (`…chamber.<tld>`, unconditional),
+    wired into both the pre-scrape filter and the post-scrape junk pass.
+  - New `blocklist.is_tourism_domain` (`visit`/`discover`/`explore` +
+    place-name-shaped domain, e.g. `visitbeulah.com`) — **conditional**,
+    gated on the vertical's own keyword being absent from the extracted
+    name, and deliberately **not** in the pre-scrape blocklist. This
+    started out unconditional like the other two, but caught a real false
+    positive during this same audit, before it shipped: "World Of Smiles
+    Pediatric Dentistry" at `visitworldofsmiles.com` — a genuine, verified
+    Portland, OR pediatric dental practice (confirmed via direct lookup:
+    real address, phone, founder, Yelp reviews) using "visit" as ordinary
+    marketing language, not a tourism-board naming convention. Caught by
+    actually re-running the new rule against real production data (not
+    just the reported cases) before finalizing — see §6a rule 5a for the
+    full story and why `is_chamber_domain` stayed unconditional while this
+    one didn't (a real business's own domain can plausibly start with
+    "visit"; it essentially never ends in "chamber.com").
+  - `junk_filter._KNOWN_JUNK_COMPANY_NAMES` — exact-match backstop for
+    "Business Data Provider" / "Yellow Pages USA" / "Social Tables" /
+    "Here Comes the Guide" (no domain given in the original report;
+    domains for the latter two — socialtables.com, herecomestheguide.com
+    — and two more found by re-running the rules against real data
+    (poidata.io, ypages.us) were confirmed via web lookup and added to
+    the blocklist directly, so this backstop is now mostly redundant for
+    those specific names but stays as a safety net).
+  - `_OFF_TARGET_NAME_PATTERNS`'s "Visit \<Placename\>" pattern extended to
+    also match "Discover"/"Explore" (same CVB naming convention).
+  - `GENERIC_EMAIL_PREFIXES` +5 (`chamber`, `chamberinfo`, `citymanager`,
+    `cvb`, `tourism`).
+  - `blocklist.py` domain-set additions: `archive.org` → `PLATFORM_DOMAINS`;
+    new `NEWS_AND_MEDIA_DOMAINS` (8 local news/magazine sites, general —
+    not vertical-specific); new `GOVERNMENT_CHAMBER_TOURISM_DOMAINS` (6
+    specific confirmed domains not caught by the general TLD/suffix
+    checks); `EVENT_AND_FLORAL_DIRECTORY_DOMAINS` +17 (6 national wedding-
+    planner/media domains repeatedly scraped as local across many states,
+    8 more national flower-delivery aggregators, 3 confirmed directory/
+    data-broker domains). See §6/§6a for the full per-set breakdown.
+  - **Every new rule is general, not Event/Floral-specific** — wired into
+    the shared `should_skip_result` (pre-scrape) and `junk_filter.check_lead`
+    (post-scrape) functions every vertical/service already goes through,
+    per the user's explicit ask that "these kinda junk get filtered when
+    we choose other business type." Verified directly: re-ran the new
+    rules against the live Dental Practices `leads.csv` (unrelated to this
+    audit) and it correctly dropped 8 more rows (2 city/state government
+    health pages, 1 university health system, 4 community-college dental-
+    *hygiene training clinics*, 1 local newspaper) — none of which are a
+    real bookkeeping-client prospect — while correctly keeping "World Of
+    Smiles Pediatric Dentistry" once the precision fix above was in place.
+  - Verified every new rule against all ~27 originally-reported cases
+    (100% caught) plus a control set including two known-tricky adversarial
+    names ("Chambers Florist" as a hypothetical real business, and the
+    already-confirmed-real "Sitka Weddings & Events LLC" from the
+    2026-09-15 audit) — both correctly survive.
+  - **Applied retroactively**: the live `data/leads.csv` (Dental Practices,
+    1735 rows) rescanned and re-junk-filtered → 1727 rows, 8 dropped (see
+    above). Separately, all 9 Event Management + Floral export snapshots
+    from 2026-09-16/18/19 (5,446 combined rows after dedupe, covering all
+    50 states) were rescanned and re-junk-filtered → 5,359 kept (87
+    dropped), then saved as one new consolidated snapshot,
+    `data/exports/2026-09-24_EventManagement+FloralBusinesses_AllStates_cleaned.xlsx`
+    (1,015 with email), so the user can send from a single clean file
+    tonight instead of picking through 9 separate ones. The 9 original
+    (uncleaned) snapshots were moved — not deleted — to
+    `data/exports/_superseded_2026-09-24/` so they no longer appear in the
+    Send Emails/Send Texts "send from a saved run" picker (avoiding the
+    real risk of accidentally re-selecting an old, junk-containing
+    snapshot alongside the new clean one) while staying recoverable if
+    ever needed. None of this touched `data/leads.csv`'s *current*
+    contents beyond the Dental Practices rescan above — Event Management +
+    Floral data lives only in the exports archive right now, per §14's
+    existing "decouple scraping from sending" design.
+- **2026-09-23 (frontend re-themed to the client's brand colors)** — User
+  request: make the dashboard "more fancy" using the colors from the email
+  signature logo. See §2a for the full mechanism. Short version:
+  `.streamlit/config.toml` and a new custom CSS block switched from an
+  unrelated purple palette to gold (`#E3BC30`/`#F2D571`) and near-black,
+  extracted directly from `lead_finder/assets/signature_logo.png` via a
+  pixel-count script rather than eyeballed; added a hero header banner
+  with the brand logo, gradient-gold title, and an animated shimmer
+  divider; gold accents on metric cards, buttons, active tabs, and the
+  scrollbar. New asset `lead_finder/assets/logo_header.png` — a
+  transparent, dark-mode-safe variant of the logo (the original is a
+  flat white-background PNG, fine for email, illegible/ugly on a dark
+  header) — generated in two passes after the first version shipped with
+  the black wordmark nearly invisible against the dark background;
+  caught via an actual Playwright screenshot of a live local instance,
+  not by reading the CSS. `signature_logo.png` itself and the email
+  signature path are untouched. Verified end-to-end across Find Leads
+  and Lead Database (real 1,735-row data) on a live local instance.
+- **2026-09-22 (8x8 credentials rotated; SMS routing is US/Canada only;
+  test-text prefix changed)** — The 8x8 SMS integration had been failing
+  with `HTTP 401: "Request was not authenticated properly"` since it was
+  first wired up. Diagnosed via direct `requests.post()` calls straight to
+  the 8x8 API (bypassing the app, garbage destination to isolate auth vs.
+  validation errors) — confirmed twice, days apart, that the previous
+  `EIGHTXEIGHT_API_KEY`/`EIGHTXEIGHT_SUBACCOUNT_ID` pair was being rejected
+  by 8x8's own servers, unrelated to any Lead Finder code (the
+  `Authorization: Bearer <key>` header construction in `texter.py` was
+  re-checked and matches 8x8's docs). The client's earlier claim that
+  "outgoing messages work perfectly on her side" turned out to be a test
+  through the 8x8 Connect dashboard's own login session — a different
+  auth mechanism entirely, so it never actually validated this API key.
+  User generated a fresh API key + subaccount ID
+  (`ProfitPathSolutionLLC_3xXF7_hq`) from the 8x8 Connect dashboard;
+  `.env` updated, same direct-API probe now returns a validation error
+  instead of a 401 (auth passing), and a real test send through
+  `texter.send_text` succeeded end-to-end.
+  Follow-up problem found immediately after: test sends to Pakistani
+  numbers returned HTTP 200 from 8x8 (accepted) but never arrived on the
+  handsets. User confirmed directly with 8x8: **this subaccount only
+  routes SMS to US/Canada destinations** — international sends are
+  silently dropped downstream after being accepted by the API, not
+  rejected at the API level, so a 200 response does not mean delivered.
+  `TEST_TEXT_NUMBERS` replaced with 3 US numbers; see §13 for the updated
+  note on this. Also, at the user's request, the test-send prefix changed
+  from `[TEST]` to `TEST SMS: ` (§14) — one line in `app.py`, no other
+  behavior change.
 - **2026-09-18 (search-failure circuit breaker + DNS-aware error message)**
   — User hit a real run where 36 queries failed with the identical
   pattern across 3 different engines (`search.yahoo.com`,

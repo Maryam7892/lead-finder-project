@@ -63,7 +63,14 @@ _OFF_TARGET_NAME_PATTERNS = [
     re.compile(r"\b(magazine|blog|podcast|newsletter|wikipedia|fandom|encyclopedia)\b", re.I),
     re.compile(r"\b(vendor directory|business directory|\bdirectory\b|listings?)\b", re.I),
     re.compile(r"\b(chamber of commerce|visitors? bureau|convention (and|&) visitors|tourism (board|bureau)|visitor center|turismo)\b", re.I),
-    re.compile(r"^\s*visit\s+\w", re.I),  # "Visit Vacaville", "Visit Bishop" — destination-marketing sites
+    # "Visit Vacaville", "Discover Dunwoody", "Explore Asheville" —
+    # destination-marketing / CVB sites. "discover"/"explore" added
+    # 2026-09-24 alongside "visit" after "Discover Dunwoody" turned up in
+    # a nationwide Event Management + Floral audit — same naming
+    # convention, different verb. See also blocklist.is_tourism_domain,
+    # which catches the no-space domain form of the same convention
+    # ("visitbeulah.com") when the extracted NAME doesn't say "Visit ...".
+    re.compile(r"^\s*(visit|discover|explore)\s+\w", re.I),
     re.compile(r"\bfilm\s*&?\s*tv production\b", re.I),
     # Local newspapers — masthead-style naming words that are essentially
     # never a dental/event/floral business name ("The Andalusia Star-News").
@@ -130,6 +137,17 @@ _BROKEN_NAME_TOKENS = {
     "page not found", "404", "site", "website",
 }
 
+# Specific known directory/media/software-product names that recur across
+# states with no other distinguishing signal — found in a nationwide
+# Event Management + Floral audit (2026-09-24) where a domain wasn't given
+# or confirmable but the extracted name is unambiguous. Exact (case-
+# insensitive) match only, not a substring, to avoid ever catching a real
+# business that happens to share a word with one of these.
+_KNOWN_JUNK_COMPANY_NAMES = {
+    "business data provider", "yellow pages usa", "social tables",
+    "here comes the guide",
+}
+
 
 def _contains_any(haystack: str, needles) -> Optional[str]:
     for n in needles:
@@ -155,9 +173,15 @@ def check_lead(row: Dict, vertical_keywords: Optional[List[str]] = None) -> Tupl
     # 1. Known bad / directory / national-gateway domain (defense in depth —
     #    upstream blocklist should already have skipped it pre-scrape; this
     #    still catches rows collected before a domain was added to the list).
+    # is_tourism_domain is deliberately NOT here — see step 5a below for why.
     if domain and not domain.startswith("osm:"):
-        if blocklist.is_blocked_domain(domain) or blocklist.is_foreign_tld(domain):
-            return True, f"blocked/directory domain ({domain})"
+        if (
+            blocklist.is_blocked_domain(domain)
+            or blocklist.is_foreign_tld(domain)
+            or blocklist.is_institutional_tld(domain)
+            or blocklist.is_chamber_domain(domain)
+        ):
+            return True, f"blocked/directory/institutional domain ({domain})"
 
     # 2. Name-quality red flags (listicle title, keyword salad, parked, slug).
     if blocklist.is_low_quality_name(name):
@@ -166,6 +190,11 @@ def check_lead(row: Dict, vertical_keywords: Optional[List[str]] = None) -> Tupl
     # 3. Broken extraction — the "name" is a nav label or a bare fragment.
     if name_l.strip(" .|-–—:") in _BROKEN_NAME_TOKENS or not re.search(r"[A-Za-z]", name):
         return True, f"unusable extracted name ({name!r})"
+
+    # 3a. Known recurring directory/media/software-product name with no
+    # confirmable domain to blocklist instead (see _KNOWN_JUNK_COMPANY_NAMES).
+    if name_l.strip() in _KNOWN_JUNK_COMPANY_NAMES:
+        return True, f"known directory/media name ({name!r})"
 
     # 4. Sells-to-an-industry / media / directory / sanitation-rental name.
     for pat in _OFF_TARGET_NAME_PATTERNS:
@@ -189,6 +218,26 @@ def check_lead(row: Dict, vertical_keywords: Optional[List[str]] = None) -> Tupl
         hit = _contains_any(name_l, _CONDITIONAL_OFF_TARGET_TERMS)
         if hit:
             return True, f"off-target term '{hit}' with no matching vertical keyword"
+
+    # 5a. "visit<place>.com" / "discover<place>.com" / "explore<place>.com"
+    # domains — CONDITIONAL, not unconditional, and deliberately not in the
+    # pre-scrape blocklist either. Reason: "visit" in particular is also
+    # ordinary marketing language a real business puts in its OWN domain
+    # ("visitworldofsmiles.com" — a genuine, verified Portland, OR pediatric
+    # dental practice; "come visit us" as branding, not a tourism board).
+    # Caught as a real false positive during the 2026-09-24 audit that
+    # added this rule, BEFORE it shipped — same precision-first bar as the
+    # 2026-09-14 mailto:-consumer-domain narrowing. Gated on the vertical's
+    # own keyword being absent from the name, exactly like the "hospital"
+    # conditional term above: a real dental practice's name says "dental"/
+    # "dentistry" and is spared; "Bloom 'n House" at visitbeulah.com (an
+    # actual Sitka-style tourism-board page, no floral keyword in the name)
+    # is still correctly dropped. `is_chamber_domain` stays UNCONDITIONAL
+    # (above, step 1) since no legitimate business's own domain ends in
+    # "chamber.<tld>" — there's no equivalent false-positive path for it.
+    if not kw_hit and domain and not domain.startswith("osm:"):
+        if blocklist.is_tourism_domain(domain):
+            return True, f"tourism/CVB-style domain with no matching vertical keyword ({domain})"
 
     # 6. Templated-network email prefix (e.g. "wecare@") — a strong signal
     # this is one page in a machine-generated multi-city network, not an
