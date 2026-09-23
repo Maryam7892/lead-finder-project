@@ -1470,7 +1470,7 @@ merges any newly-found non-empty fields.
 
 ## Change log
 
-- **2026-09-24 (nationwide Event Management + Floral audit, 4 sweeps;
+- **2026-09-24 (nationwide Event Management + Floral audit, 5 sweeps;
   general government/chamber/tourism/news filtering; two real precision
   bugs caught before shipping)** — User audited a combined, all-50-states
   Event Management + Floral database (built from several search runs
@@ -1587,13 +1587,22 @@ merges any newly-found non-empty fields.
     "Collegeville" are real Pennsylvania towns). This is why the news/
     government/tourism domain lists stay manually-curated, explicit lists
     rather than a blanket keyword-based auto-drop.
+  - **Fifth sweep, same day, user-reported**: 3 more mis-tagged rows —
+    `latimes.com` (Los Angeles Times) and `yakimaherald.com` (Yakima
+    Herald-Republic), both newspapers, added to `NEWS_AND_MEDIA_DOMAINS`;
+    `unlostmedia.com` ("Unlost Media"), confirmed via lookup to be a
+    wedding/elopement **photography** business — already an unconditional
+    off-target category here (§6a rule 4), just not caught by that NAME
+    pattern since its branding doesn't contain the word "photography" —
+    added to `EVENT_AND_FLORAL_DIRECTORY_DOMAINS` as the domain-level
+    backstop for that case.
   - **Applied retroactively and re-verified after every fix**: the live
     `data/leads.csv` (Dental Practices) ended at 1,726 rows (down from an
     original 1,735, then briefly wrongly at 1,724 before the "Meet Dr."
     restore). The Event Management + Floral data — 9 export snapshots
     from 2026-09-16/18/19, 5,446 combined rows after dedupe, all 50
     states — was rescanned from scratch after each rule change and ended
-    at **5,313 kept rows (133 dropped), 1,007 with email**, saved as one
+    at **5,310 kept rows (136 dropped), 1,004 with email**, saved as one
     consolidated snapshot,
     `data/exports/2026-09-24_EventManagement+FloralBusinesses_AllStates_cleaned.xlsx`,
     so the user can send from a single clean file instead of picking

@@ -89,9 +89,12 @@ NEWS_AND_MEDIA_DOMAINS = {
     # rather than an automatic keyword drop).
     "fcfreepresspa.com", "businessjournaldaily.com", "detroitweekly.org",
     "pressherald.com", "thefallonpost.org", "devilslakejournal.com",
-    # fourth (final) sweep — two local TV news stations (WOAI/San
-    # Antonio, ABC7/San Francisco).
+    # fourth sweep — two local TV news stations (WOAI/San Antonio,
+    # ABC7/San Francisco).
     "news4sanantonio.com", "abc7news.com",
+    # fifth sweep, user-reported — a major national newspaper and a local
+    # one, both mis-tagged under Floral Businesses.
+    "latimes.com", "yakimaherald.com",
 }
 
 # City/county/state government sites, chambers of commerce, and tourism /
@@ -248,6 +251,13 @@ EVENT_AND_FLORAL_DIRECTORY_DOMAINS = {
     "terrysflorist.com", "flowersbyeva.com", "odealarose.com",
     "bloomypresents.com", "cityflowershop.com", "flowersezgo.com",
     "theflowershop.com", "quickflowerdelivery.com",
+    # a wedding/elopement PHOTOGRAPHY business (confirmed via lookup) that
+    # slipped past the unconditional photography name-pattern because its
+    # own branding is generic ("Unlost Media") rather than containing the
+    # word "photography" — photography is never a target of any vertical
+    # here (§6a rule 4), this is just the domain-level backstop for a case
+    # the name pattern structurally can't catch.
+    "unlostmedia.com",
     # confirmed real domains behind two of the _KNOWN_JUNK_COMPANY_NAMES
     # entries in junk_filter.py (found by retroactively re-running the new
     # rules against real data, not guessed) — a POI/business-data API
