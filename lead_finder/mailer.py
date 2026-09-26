@@ -258,16 +258,30 @@ def send_email(smtp_config: Dict, to_email: str, subject: str, body: str,
 
 
 def send_batch(smtp_config: Dict, jobs: List[Dict], delay_seconds: float = 4.0,
-                progress_cb: Optional[Callable] = None) -> List[Dict]:
+                progress_cb: Optional[Callable] = None,
+                should_stop: Optional[Callable[[], bool]] = None) -> List[Dict]:
     """
     jobs: list of {"to": str, "subject": str, "body": str, "html_body":
     (optional) str, "inline_images": (optional) dict, ...any extra keys you
     want echoed back in the result, e.g. "domain", "company_name"}.
     Returns each job dict with "success" and "error" added.
+
+    should_stop: optional zero-arg callable checked before every send AND
+    in 0.5s increments during the inter-send delay (not just once per
+    email) — added after a real incident where a user needed to stop a
+    live 1,004-email batch and the only way to do it was killing the whole
+    Streamlit process, since there was no in-app stop mechanism at all.
+    Checking mid-delay too (not just at the top of the loop) means a stop
+    request takes effect within ~0.5s instead of waiting out however much
+    of the delay was left — the currently in-flight email (if any) is
+    still allowed to finish rather than being interrupted mid-send, which
+    would risk an ambiguous half-sent state.
     """
     results = []
     total = len(jobs)
     for i, job in enumerate(jobs):
+        if should_stop and should_stop():
+            break
         success, error = send_email(
             smtp_config, job["to"], job["subject"], job["body"],
             html_body=job.get("html_body"), inline_images=job.get("inline_images"),
@@ -277,7 +291,15 @@ def send_batch(smtp_config: Dict, jobs: List[Dict], delay_seconds: float = 4.0,
         if progress_cb:
             progress_cb(i + 1, total, result)
         if i < total - 1:
-            time.sleep(delay_seconds)
+            remaining = delay_seconds
+            while remaining > 0:
+                if should_stop and should_stop():
+                    break
+                chunk = min(0.5, remaining)
+                time.sleep(chunk)
+                remaining -= chunk
+            if should_stop and should_stop():
+                break
     return results
 
 

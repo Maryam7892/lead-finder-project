@@ -119,9 +119,13 @@ def _run_email_batch_in_background(smtp_config, jobs, delay_seconds, state):
                             result["service"], result["subject"], status, result.get("error", ""))
         state["done"] = done
         state["total"] = total
-    results = mailer.send_batch(smtp_config, jobs, delay_seconds=delay_seconds, progress_cb=progress_cb)
+    def should_stop():
+        return state.get("stop_requested", False)
+    results = mailer.send_batch(smtp_config, jobs, delay_seconds=delay_seconds,
+                                 progress_cb=progress_cb, should_stop=should_stop)
     _write_daily_sent_records_csv(results)
     state["results"] = results
+    state["stopped_early"] = state.get("stop_requested", False)
     state["complete"] = True
 
 
@@ -132,8 +136,12 @@ def _run_text_batch_in_background(texting_config, jobs, delay_seconds, state):
                                  status, result.get("error", ""), variant=result.get("variant", ""))
         state["done"] = done
         state["total"] = total
-    results = texter.send_text_batch(texting_config, jobs, delay_seconds=delay_seconds, progress_cb=progress_cb)
+    def should_stop():
+        return state.get("stop_requested", False)
+    results = texter.send_text_batch(texting_config, jobs, delay_seconds=delay_seconds,
+                                      progress_cb=progress_cb, should_stop=should_stop)
     state["results"] = results
+    state["stopped_early"] = state.get("stop_requested", False)
     state["complete"] = True
 
 
@@ -151,6 +159,9 @@ def _run_bulk_batch_in_background(smtp_config, texting_config, email_jobs, text_
     pass) means this reuses those two already-tested functions completely
     unmodified, rather than a third, riskier combined-send implementation.
     """
+    def should_stop():
+        return state.get("stop_requested", False)
+
     email_results = []
     if email_jobs:
         def email_cb(done, total, result):
@@ -159,22 +170,121 @@ def _run_bulk_batch_in_background(smtp_config, texting_config, email_jobs, text_
                                 result["service"], result["subject"], status, result.get("error", ""))
             state["email_done"] = done
             state["email_total"] = total
-        email_results = mailer.send_batch(smtp_config, email_jobs, delay_seconds=email_delay, progress_cb=email_cb)
+        email_results = mailer.send_batch(smtp_config, email_jobs, delay_seconds=email_delay,
+                                           progress_cb=email_cb, should_stop=should_stop)
         _write_daily_sent_records_csv(email_results)
 
     text_results = []
-    if text_jobs:
+    if text_jobs and not should_stop():
         def text_cb(done, total, result):
             status = "sent" if result["success"] else "failed"
             texter.record_sent_text(result["to"], result["company_name"], result["service"],
                                      status, result.get("error", ""), variant=result.get("variant", ""))
             state["text_done"] = done
             state["text_total"] = total
-        text_results = texter.send_text_batch(texting_config, text_jobs, delay_seconds=text_delay, progress_cb=text_cb)
+        text_results = texter.send_text_batch(texting_config, text_jobs, delay_seconds=text_delay,
+                                               progress_cb=text_cb, should_stop=should_stop)
 
     state["email_results"] = email_results
     state["text_results"] = text_results
+    state["stopped_early"] = state.get("stop_requested", False)
     state["complete"] = True
+
+
+# ------------------------------------------------- live send progress + stop --
+# A real incident (2026-09-26): a user started a 1,004-email batch, watched
+# the progress bar read "0/1004" for over 3 minutes, and concluded sending
+# was stuck — it wasn't; 700+ emails had actually gone out. The old design
+# only updated the displayed count when the user manually clicked a
+# "Refresh progress" button, which nothing told them to do. Separately,
+# there was no way to stop a running batch short of killing the whole
+# Streamlit process. `st.fragment(run_every=...)` (stable since Streamlit
+# 1.37, confirmed present in the pinned 1.38.0) fixes both: it reruns just
+# this block on a timer, independent of the rest of the page, so the count
+# is never more than ~1s stale with no user action required, and a Stop
+# button lives right next to it. Shared by Send Emails and Send Texts
+# (single done/total counter); Bulk Send uses its own two-bar variant below
+# since it tracks email and text progress separately.
+@st.fragment(run_every="1s")
+def _render_send_progress(state_key: str, item_noun: str = "emails"):
+    state = st.session_state.get(state_key)
+    if state is None:
+        return
+    done, total = state.get("done", 0), state.get("total", 0)
+    is_running = not state.get("complete", False)
+    if total:
+        st.progress(done / total if total else 0.0,
+                    text=f"{done}/{total} {item_noun} processed" + ("" if is_running else " — complete"))
+    if is_running:
+        if state.get("stop_requested"):
+            st.info(f"Stopping — finishing the {item_noun[:-1]} already in flight, "
+                    f"then no more will send ({done}/{total} sent so far).", icon="🛑")
+        else:
+            st.info(f"Sending in progress ({done}/{total}) — updates automatically, "
+                    "no need to refresh, and this keeps running even if you switch tabs.", icon="⏳")
+            if st.button("🛑 Stop sending", key=f"stop_{state_key}", type="secondary"):
+                state["stop_requested"] = True
+    else:
+        results = state.get("results", [])
+        sent_ok = sum(1 for r in results if r["success"])
+        sent_fail = len(results) - sent_ok
+        stopped_early = state.get("stopped_early", False)
+        not_attempted = total - done
+        tail = f" {not_attempted} were never attempted (stopped early)." if stopped_early and not_attempted else ""
+        if sent_fail == 0:
+            st.success(f"{'Stopped.' if stopped_early else 'Done.'} Sent {sent_ok} {item_noun}.{tail}")
+        else:
+            st.warning(f"{'Stopped.' if stopped_early else 'Done.'} Sent {sent_ok}, failed {sent_fail}.{tail} "
+                       "See the log below for details.")
+            failures_df = pd.DataFrame([
+                {"company": r.get("company_name", ""), "to": r.get("to", ""), "error": r["error"]}
+                for r in results if not r["success"]
+            ])
+            st.dataframe(failures_df, use_container_width=True, hide_index=True)
+        if st.button("Clear this status", key=f"clear_{state_key}"):
+            st.session_state[state_key] = None
+            st.rerun()
+
+
+@st.fragment(run_every="1s")
+def _render_bulk_send_progress(state_key: str):
+    state = st.session_state.get(state_key)
+    if state is None:
+        return
+    is_running = not state.get("complete", False)
+    email_done, email_total = state.get("email_done", 0), state.get("email_total", 0)
+    text_done, text_total = state.get("text_done", 0), state.get("text_total", 0)
+    if email_total:
+        st.progress(email_done / email_total, text=f"Emails: {email_done}/{email_total}")
+    if text_total:
+        st.progress(text_done / text_total, text=f"Texts: {text_done}/{text_total}")
+    if is_running:
+        if state.get("stop_requested"):
+            st.info("Stopping — finishing anything already in flight, then no more will send.", icon="🛑")
+        else:
+            st.info("Sending in progress — updates automatically, no need to refresh, and this "
+                    "keeps running even if you switch tabs.", icon="⏳")
+            if st.button("🛑 Stop sending", key=f"stop_{state_key}", type="secondary"):
+                state["stop_requested"] = True
+    else:
+        email_results = state.get("email_results", [])
+        text_results = state.get("text_results", [])
+        email_ok = sum(1 for r in email_results if r["success"])
+        text_ok = sum(1 for r in text_results if r["success"])
+        stopped_early = state.get("stopped_early", False)
+        st.success(f"{'Stopped.' if stopped_early else 'Done.'} Sent {email_ok} email(s), {text_ok} text(s).")
+        all_failures = (
+            [{"company": r.get("company_name", ""), "channel": "email", "to": r.get("to", ""), "error": r["error"]}
+             for r in email_results if not r["success"]]
+            + [{"company": r.get("company_name", ""), "channel": "text", "to": r.get("to", ""), "error": r["error"]}
+               for r in text_results if not r["success"]]
+        )
+        if all_failures:
+            st.warning(f"{len(all_failures)} failed — see below.")
+            st.dataframe(pd.DataFrame(all_failures), use_container_width=True, hide_index=True)
+        if st.button("Clear this status", key=f"clear_{state_key}"):
+            st.session_state[state_key] = None
+            st.rerun()
 
 
 def _run_browser_retry_in_background(leads, state):
@@ -1655,7 +1765,8 @@ with tab_send:
                             "target_vertical": row.get("target_vertical", ""),
                         })
 
-                    new_state = {"done": 0, "total": len(jobs), "results": [], "complete": False}
+                    new_state = {"done": 0, "total": len(jobs), "results": [], "complete": False,
+                                 "stop_requested": False}
                     st.session_state.email_send_state = new_state
                     threading.Thread(
                         target=_run_email_batch_in_background,
@@ -1668,34 +1779,9 @@ with tab_send:
 
             # Separate from the block above so results/progress still show even
             # after a send completes and "eligible" drops to empty (everyone
-            # just got marked as already-sent).
-            send_state = st.session_state.get("email_send_state")
-            if send_state is not None:
-                done, total = send_state["done"], send_state["total"]
-                if total:
-                    st.progress(done / total if total else 0.0,
-                                text=f"{done}/{total} processed" + (" — complete" if send_state["complete"] else ""))
-                if send_state["complete"]:
-                    results = send_state["results"]
-                    sent_ok = sum(1 for r in results if r["success"])
-                    sent_fail = len(results) - sent_ok
-                    if sent_fail == 0:
-                        st.success(f"Done. Sent {sent_ok} emails.")
-                    else:
-                        st.warning(f"Sent {sent_ok}, failed {sent_fail}. See the log below for details.")
-                        failures_df = pd.DataFrame([
-                            {"company": r["company_name"], "email": r["to"], "error": r["error"]}
-                            for r in results if not r["success"]
-                        ])
-                        st.dataframe(failures_df, use_container_width=True, hide_index=True)
-                    if st.button("Clear this status", key="clear_email_send_state"):
-                        st.session_state.email_send_state = None
-                        st.rerun()
-                else:
-                    st.info(f"Sending in progress ({done}/{total}) — this keeps running in the background even if "
-                            "you switch tabs. Click below to check on it.", icon="⏳")
-                    if st.button("🔄 Refresh progress", key="refresh_email_progress"):
-                        st.rerun()
+            # just got marked as already-sent). Live-updating + has a Stop
+            # button — see _render_send_progress's docstring for why.
+            _render_send_progress("email_send_state", item_noun="emails")
 
             with st.expander("Suppression list (emails/domains to never contact)"):
                 current = mailer.load_suppression()
@@ -1954,7 +2040,8 @@ with tab_text:
                             "variant": active_sms_variant,
                         })
 
-                    new_state = {"done": 0, "total": len(jobs), "results": [], "complete": False}
+                    new_state = {"done": 0, "total": len(jobs), "results": [], "complete": False,
+                                 "stop_requested": False}
                     st.session_state.text_send_state = new_state
                     threading.Thread(
                         target=_run_text_batch_in_background,
@@ -1966,34 +2053,9 @@ with tab_text:
                 st.caption("Nothing eligible to text right now — adjust the filters above or run more searches.")
 
             # Separate from the block above so results/progress still show even
-            # after a send completes and "eligible" drops to empty.
-            text_send_state = st.session_state.get("text_send_state")
-            if text_send_state is not None:
-                done, total = text_send_state["done"], text_send_state["total"]
-                if total:
-                    st.progress(done / total if total else 0.0,
-                                text=f"{done}/{total} processed" + (" — complete" if text_send_state["complete"] else ""))
-                if text_send_state["complete"]:
-                    results = text_send_state["results"]
-                    sent_ok = sum(1 for r in results if r["success"])
-                    sent_fail = len(results) - sent_ok
-                    if sent_fail == 0:
-                        st.success(f"Done. Sent {sent_ok} texts.")
-                    else:
-                        st.warning(f"Sent {sent_ok}, failed {sent_fail}. See the log below for details.")
-                        failures_df = pd.DataFrame([
-                            {"company": r["company_name"], "phone": r["to"], "error": r["error"]}
-                            for r in results if not r["success"]
-                        ])
-                        st.dataframe(failures_df, use_container_width=True, hide_index=True)
-                    if st.button("Clear this status", key="clear_text_send_state"):
-                        st.session_state.text_send_state = None
-                        st.rerun()
-                else:
-                    st.info(f"Sending in progress ({done}/{total}) — this keeps running in the background even if "
-                            "you switch tabs. Click below to check on it.", icon="⏳")
-                    if st.button("🔄 Refresh progress", key="refresh_text_progress"):
-                        st.rerun()
+            # after a send completes and "eligible" drops to empty. Live-
+            # updating + has a Stop button — see _render_send_progress.
+            _render_send_progress("text_send_state", item_noun="texts")
 
             with st.expander("Sent text history"):
                 text_log = texter.load_sent_text_log()
@@ -2255,6 +2317,7 @@ with tab_bulk:
                         "email_done": 0, "email_total": len(email_jobs_b),
                         "text_done": 0, "text_total": len(text_jobs_b),
                         "email_results": [], "text_results": [], "complete": False,
+                        "stop_requested": False,
                     }
                     st.session_state.bulk_send_state = new_bulk_state
                     threading.Thread(
@@ -2265,43 +2328,5 @@ with tab_bulk:
                     ).start()
                     st.rerun()
 
-            bulk_send_state = st.session_state.get("bulk_send_state")
-            if bulk_send_state is not None:
-                e_done, e_total = bulk_send_state["email_done"], bulk_send_state["email_total"]
-                t_done, t_total = bulk_send_state["text_done"], bulk_send_state["text_total"]
-                if e_total:
-                    st.progress(e_done / e_total, text=f"Emails: {e_done}/{e_total}")
-                if t_total:
-                    st.progress(t_done / t_total, text=f"Texts: {t_done}/{t_total}")
-                if bulk_send_state["complete"]:
-                    e_results = bulk_send_state["email_results"]
-                    t_results = bulk_send_state["text_results"]
-                    e_ok = sum(1 for r in e_results if r["success"])
-                    t_ok = sum(1 for r in t_results if r["success"])
-                    e_fail = len(e_results) - e_ok
-                    t_fail = len(t_results) - t_ok
-                    if e_fail == 0 and t_fail == 0:
-                        st.success(f"Done. Sent {e_ok} email(s) and {t_ok} text(s).")
-                    else:
-                        st.warning(f"Done. Emails: {e_ok} sent, {e_fail} failed. "
-                                   f"Texts: {t_ok} sent, {t_fail} failed.")
-                        if e_fail:
-                            st.caption("Failed emails:")
-                            st.dataframe(pd.DataFrame([
-                                {"company": r["company_name"], "email": r["to"], "error": r["error"]}
-                                for r in e_results if not r["success"]
-                            ]), use_container_width=True, hide_index=True)
-                        if t_fail:
-                            st.caption("Failed texts:")
-                            st.dataframe(pd.DataFrame([
-                                {"company": r["company_name"], "phone": r["to"], "error": r["error"]}
-                                for r in t_results if not r["success"]
-                            ]), use_container_width=True, hide_index=True)
-                    if st.button("Clear this status", key="clear_bulk_send_state"):
-                        st.session_state.bulk_send_state = None
-                        st.rerun()
-                else:
-                    st.info("Sending in progress — this keeps running in the background even if you "
-                            "switch tabs. Click below to check on it.", icon="⏳")
-                    if st.button("🔄 Refresh progress", key="refresh_bulk_progress"):
-                        st.rerun()
+            # Live-updating + has a Stop button — see _render_bulk_send_progress.
+            _render_bulk_send_progress("bulk_send_state")

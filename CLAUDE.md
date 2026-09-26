@@ -1163,7 +1163,43 @@ Streamlit reruns/abandons the script on any interaction. Progress is a
 plain dict mutated from the thread; **no `st.*` call happens off the main
 thread**. Every send tab: test-send control → eligibility funnel with a
 metric row → 10-row preview → confirmation checkbox → send button →
-background thread → progress + results (persist after `eligible` empties).
+background thread → **live progress + Stop button** → results (persist
+after `eligible` empties).
+
+**Live progress + Stop button** (added 2026-09-26, after a real incident
+— see change log): the progress display for all three send tabs
+(`_render_send_progress` for Send Emails/Send Texts, `_render_bulk_send_progress`
+for Bulk Send, both in `app.py`) is an `@st.fragment(run_every="1s")`
+function, not a plain `if` block. A fragment reruns *itself* on a timer
+without rerunning the rest of the page, so the displayed done/total count
+is never more than ~1s stale with **no user action required** — this
+replaces the old design, which only updated the count when the user
+manually clicked a "🔄 Refresh progress" button. A real user watched
+"0/1004" for 3+ minutes (while 700+ emails had actually sent) and
+concluded sending was stuck; it wasn't, the display just never refreshed
+itself. Confirmed available in the pinned Streamlit 1.38.0
+(`st.fragment` has taken `run_every` since 1.37).
+
+A **"🛑 Stop sending"** button lives inside the same fragment, visible
+while a batch is running. Clicking it sets `state["stop_requested"] = True`
+on the same shared dict the background thread already reads/writes for
+progress — no new plumbing, just one more key. `mailer.send_batch` and
+`texter.send_text_batch` both take an optional `should_stop: Callable[[], bool]`
+param, checked (a) before every send and (b) in 0.5s increments during
+the inter-send delay, not just once per email — so a stop request takes
+effect within ~0.5s instead of waiting out however much of the multi-
+second delay was left. The email/text already in flight when Stop is
+clicked is allowed to finish (never interrupted mid-send, which risks an
+ambiguous half-sent state); nothing after it goes out. Before this,
+stopping a running batch required killing the whole Streamlit process —
+which also takes down search, the database view, and every other tab,
+not just the send. Verified with a direct test (mocked send functions,
+no real emails): requesting a stop 1.2s into a 2.0s delay halted the
+batch at 1.5s total elapsed, having sent only 1 of 20 queued jobs — the
+same mechanism and timing apply to real sends. Bulk Send's variant tracks
+and can stop **both** channels — a stop mid-email-phase also skips the
+text phase entirely (checked before `text_jobs` even starts), not just
+the current channel's remaining items.
 
 ### Email (`Send Emails` tab, `mailer.py`)
 
@@ -1225,6 +1261,31 @@ logo attached inline as `cid:sig_logo`. Each job is rendered with **its own
 lead's** service/vertical template. On each result the progress callback
 calls `mailer.record_sent(...)`; after the batch,
 `_write_daily_sent_records_csv`.
+
+> **"sent" means SMTP accepted it, not that it reached a real inbox.**
+> `send_email`'s `success=True` / `status="sent"` in `sent_log.csv` only
+> means Gmail's outbound relay returned `250 OK` for that recipient — an
+> address that's syntactically valid and whose domain accepts mail for
+> delivery. A bounce (mailbox doesn't exist, was deleted, domain stopped
+> accepting mail after the lead was scraped, etc.) happens **after** that
+> point, asynchronously, and arrives back as a bounce/NDR email in the
+> sending inbox — `smtplib`'s synchronous `sendmail()` call has already
+> returned successfully by then, so this app has no way to see it in real
+> time. This is not unique to this app; every ESP has a non-zero bounce
+> rate for the same structural reason. Confirmed real, 2026-09-26: a user
+> reported "address not found" bounces after a live 804-email send;
+> checked every address actually in `sent_log.csv` against `EMAIL_RE` and
+> found **zero** syntactically malformed ones, ruling out an extraction/
+> validation bug — these were well-formed addresses whose mailbox no
+> longer exists. **No inbound-bounce parsing is built** (see §15 — same
+> non-goal as inbound-reply parsing for unsubscribes) — an MX-record
+> pre-send check was considered as a partial mitigation (would catch a
+> domain with literally no mail server at all, a cheap and real signal)
+> but not built, since it needs a new dependency (`dnspython` isn't
+> currently installed) and only catches one narrow category of bounce
+> (a domain with no MX record), not the more common "mailbox doesn't
+> exist on an otherwise-working domain" case — revisit if bounces recur
+> at volume and the user wants that partial coverage.
 
 **Test email:** one row **per target vertical currently present** in the
 working set for the active service (in the service's own canonical
@@ -1465,11 +1526,65 @@ merges any newly-found non-empty fields.
    change to the safety model (bypassing confidence scoring entirely),
    not a bug fix — don't loosen the gate to "fix" this without the user
    explicitly asking for it.
+10. **Bulk Send's eligibility funnel gets slow on a large database** —
+    observed taking 40+ seconds to render against a real 1,726-row
+    database (computing `email_ok` and `text_ok` masks, each involving
+    per-row `.apply()` calls — suppression checks, already-sent/texted
+    lookups) while investigating the Stop-button work above; not a
+    regression from that change, just more noticeable now than when
+    Bulk Send was last verified against a 466-row database. Not
+    optimized yet — likely fix is vectorizing the per-row checks instead
+    of `.apply()`, or caching the suppression-list/already-sent lookups
+    once per batch instead of per row. Revisit if the live database
+    keeps growing and this becomes a real UX problem, not just slow.
 
 ---
 
 ## Change log
 
+- **2026-09-26 (Stop button + live progress for all 3 send tabs; bounce
+  vs. validation bug diagnosed)** — User reported three issues after a
+  live 1,004-email send the night before: (1) no way to stop a running
+  send from the UI at all — had to kill the whole Streamlit process,
+  which took the entire app down, not just the send; (2) the progress
+  bar sat at "0/1004" for 3+ minutes while 700+ emails had actually gone
+  out, making a working send look completely stuck; (3) some sent
+  addresses later bounced as "address not found."
+  - Fixed (1) and (2) together: see §14's "Common shape" for the full
+    mechanism. Short version — replaced the old manual "click Refresh to
+    see progress" pattern with `@st.fragment(run_every="1s")` (stable in
+    the pinned Streamlit 1.38.0), so the progress display updates itself
+    on a timer with no user action needed, and added a real Stop button
+    that a new `should_stop` callback param on `mailer.send_batch` /
+    `texter.send_text_batch` checks before every send and in 0.5s
+    increments during the delay (not just once per email), so stopping
+    takes effect in under a second rather than waiting out the delay or
+    finishing the whole batch. Verified with a direct test using mocked
+    send functions (no real emails sent during verification): requesting
+    a stop 1.2s into a 2.0s configured delay halted the batch at 1.5s
+    elapsed having sent 1 of 20 queued jobs, for both the email and text
+    code paths independently. Applied to all three send tabs (Send
+    Emails, Send Texts, Bulk Send) since they share the identical
+    underlying bug, not just the one the user happened to hit.
+  - Investigated (3) rather than assuming it was fixable the same way:
+    checked every address actually present in `sent_log.csv` (804 rows)
+    against `EMAIL_RE` and found zero syntactically malformed ones — so
+    this wasn't an extraction/validation gap, it was Gmail's SMTP relay
+    correctly accepting well-formed addresses that later bounced
+    asynchronously (mailbox gone, domain stopped accepting mail since
+    the lead was scraped, etc.), which no synchronous `send_email()` call
+    can see in real time. Documented this distinction explicitly in §14
+    ("sent" = SMTP-accepted, not delivery-confirmed) so it isn't mistaken
+    for a bug again. Proposed but did not build an MX-record pre-send
+    check as a partial mitigation (needs a new `dnspython` dependency and
+    only catches domains with literally no mail server, not the more
+    common "mailbox gone on an otherwise-working domain" case) — left for
+    the user to decide whether that partial coverage is worth adding.
+  - Also fixed live, mid-incident, before this change: the user's actual
+    running 1,004-email batch was stopped by killing the Streamlit
+    process (`kill -9`) at their explicit request, confirmed via
+    `sent_log.csv` no longer growing 5 seconds later — 804 of 1,004 had
+    already sent successfully at that point, none lost or duplicated.
 - **2026-09-24 (nationwide Event Management + Floral audit, 5 sweeps;
   general government/chamber/tourism/news filtering; two real precision
   bugs caught before shipping)** — User audited a combined, all-50-states

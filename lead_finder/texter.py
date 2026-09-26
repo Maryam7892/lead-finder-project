@@ -118,22 +118,36 @@ def send_text(config: Dict, to_phone: str, body: str) -> Tuple[bool, str]:
 
 
 def send_text_batch(config: Dict, jobs: List[Dict], delay_seconds: float = 3.0,
-                     progress_cb: Optional[Callable] = None) -> List[Dict]:
+                     progress_cb: Optional[Callable] = None,
+                     should_stop: Optional[Callable[[], bool]] = None) -> List[Dict]:
     """
     jobs: list of {"to": str, "body": str, ...any extra keys you want echoed
     back in the result, e.g. "domain", "company_name"}.
     Returns each job dict with "success" and "error" added.
+
+    should_stop: see mailer.send_batch's docstring — same mechanism,
+    checked before every send and in 0.5s increments during the delay.
     """
     results = []
     total = len(jobs)
     for i, job in enumerate(jobs):
+        if should_stop and should_stop():
+            break
         success, error = send_text(config, job["to"], job["body"])
         result = dict(job, success=success, error=error)
         results.append(result)
         if progress_cb:
             progress_cb(i + 1, total, result)
         if i < total - 1:
-            time.sleep(delay_seconds)
+            remaining = delay_seconds
+            while remaining > 0:
+                if should_stop and should_stop():
+                    break
+                chunk = min(0.5, remaining)
+                time.sleep(chunk)
+                remaining -= chunk
+            if should_stop and should_stop():
+                break
     return results
 
 
